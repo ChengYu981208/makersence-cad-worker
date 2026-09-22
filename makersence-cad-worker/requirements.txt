@@ -1,0 +1,9 @@
+fastapi==0.128.2
+uvicorn[standard]==0.48.0
+cadquery==2.8.0
+trimesh==4.11.1
+numpy==2.3.5
+shapely==2.1.2
+Pillow>=10.0
+httpx>=0.27
+pytest>=8.0
