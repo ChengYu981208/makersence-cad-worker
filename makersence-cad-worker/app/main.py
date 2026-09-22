@@ -19,7 +19,7 @@ def auth(c:HTTPAuthorizationCredentials|None=Depends(_bearer)):
     return True
 
 @app.get('/health')
-def health(_:bool=Depends(auth)):
+def health():
     return {
         'ok':True,'service':'makersence-cad-worker','version':VERSION,'engine':'cadquery+trimesh+shapely',
         'capabilities':['compact_step_brep','detachable_parts','assembly_render','product_dimensions','open_edges_zero_gate','formal_mesh_render','artifact_reaudit','source_asset_upload','source_interface_section_extraction','INTERFACE_LOCKED_CAD','INTERFACE_MECHANISM_CAD','MECHANISM_CAD','legacy_adapter_bridge'],
