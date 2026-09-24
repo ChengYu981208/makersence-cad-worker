@@ -61,22 +61,45 @@ exec /usr/bin/strace -ff -tt -s 256 -o /home/slicer/bambu.strace \
 EOS
 chmod 755 /usr/local/bin/bambu-direct
 
-exec runuser -u slicer -- env -i \
-  PATH=/usr/local/bin:/usr/bin:/bin \
-  HOME=/home/slicer USER=slicer LOGNAME=slicer SHELL=/bin/bash \
-  XDG_DATA_HOME=/home/slicer/.local/share \
-  XDG_CACHE_HOME=/home/slicer/.cache \
-  XDG_CONFIG_HOME=/home/slicer/.config \
-  XDG_STATE_HOME=/home/slicer/.local/state \
-  XDG_RUNTIME_DIR="/run/user/$SUID" \
-  XDG_DATA_DIRS=/home/slicer/.local/share/flatpak/exports/share:/usr/local/share:/usr/share:/var/lib/flatpak/exports/share \
-  XDG_CONFIG_DIRS=/etc/xdg \
-  FLATPAK_USER_DIR=/home/slicer/.local/share/flatpak \
-  DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket \
-  PORT="${PORT:-8080}" \
-  SLICER_TOKEN="${SLICER_TOKEN:-}" \
-  BAMBU_BIN=/usr/local/bin/bambu-direct \
-  BAMBU_VERSION=2.8.2.61 \
-  BAMBU_DISPLAY_MODE=x11_flatpak \
-  SLICER_JOB_ROOT=/home/slicer/makersence_slicer_jobs \
-  python /app/app.py
+run_worker() {
+  runuser -u slicer -- env -i \
+    PATH=/usr/local/bin:/usr/bin:/bin \
+    HOME=/home/slicer USER=slicer LOGNAME=slicer SHELL=/bin/bash \
+    XDG_DATA_HOME=/home/slicer/.local/share \
+    XDG_CACHE_HOME=/home/slicer/.cache \
+    XDG_CONFIG_HOME=/home/slicer/.config \
+    XDG_STATE_HOME=/home/slicer/.local/state \
+    XDG_RUNTIME_DIR="/run/user/$SUID" \
+    XDG_DATA_DIRS=/home/slicer/.local/share/flatpak/exports/share:/usr/local/share:/usr/share:/var/lib/flatpak/exports/share \
+    XDG_CONFIG_DIRS=/etc/xdg \
+    FLATPAK_USER_DIR=/home/slicer/.local/share/flatpak \
+    DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket \
+    PORT="${PORT:-8080}" \
+    SLICER_TOKEN="${SLICER_TOKEN:-}" \
+    BAMBU_BIN=/usr/local/bin/bambu-direct \
+    BAMBU_VERSION=2.8.2.61 \
+    BAMBU_DISPLAY_MODE=x11_flatpak \
+    SLICER_JOB_ROOT=/home/slicer/makersence_slicer_jobs \
+    python /app/app.py
+}
+
+if [ "${MAKERSENCE_SHADOW_SMOKE:-0}" = "1" ]; then
+  run_worker &
+  WORKER_PID=$!
+  cleanup(){ kill "$WORKER_PID" >/dev/null 2>&1 || true; }
+  trap cleanup EXIT
+  READY=0
+  for _ in $(seq 1 120); do
+    if python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:${PORT:-8080}/health',timeout=2).read()" >/dev/null 2>&1; then READY=1; break; fi
+    sleep 1
+  done
+  if [ "$READY" != "1" ]; then
+    echo 'SLICER_SHADOW_SMOKE_RESULT={"status":"FAIL","stage":"health_wait"}'
+    exit 4
+  fi
+  PORT="${PORT:-8080}" SLICER_TOKEN="${SLICER_TOKEN:-}" python3 /app/shadow_smoke.py
+  trap - EXIT
+  wait "$WORKER_PID"
+else
+  exec run_worker
+fi
