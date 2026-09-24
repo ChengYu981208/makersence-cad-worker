@@ -73,8 +73,8 @@ exec runuser -u slicer -- env -i \
   XDG_CONFIG_DIRS=/etc/xdg \
   FLATPAK_USER_DIR=/home/slicer/.local/share/flatpak \
   DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket \
-  PORT="\${PORT:-8080}" \
-  SLICER_TOKEN="\${SLICER_TOKEN:-}" \
+  PORT="${PORT:-8080}" \
+  SLICER_TOKEN="${SLICER_TOKEN:-}" \
   BAMBU_BIN=/usr/local/bin/bambu-direct \
   BAMBU_VERSION=2.8.2.61 \
   BAMBU_DISPLAY_MODE=x11_flatpak \
