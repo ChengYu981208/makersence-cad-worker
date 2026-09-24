@@ -101,5 +101,5 @@ if [ "${MAKERSENCE_SHADOW_SMOKE:-0}" = "1" ]; then
   trap - EXIT
   wait "$WORKER_PID"
 else
-  exec run_worker
+  run_worker
 fi
