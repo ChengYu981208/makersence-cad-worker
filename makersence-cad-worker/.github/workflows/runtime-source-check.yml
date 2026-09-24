@@ -1,0 +1,40 @@
+name: Runtime Source Check
+
+on:
+  push:
+    branches:
+      - consolidation/runtime-snapshots-20260925
+  pull_request:
+    paths:
+      - "makersence-cad-worker/runtime/**"
+      - "makersence-cad-worker/app/**"
+
+jobs:
+  static-check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: makersence-cad-worker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Python syntax
+        run: |
+          python -m py_compile runtime/heavy/app.py
+          python -m py_compile runtime/cad-core-v5/app.py
+          python -m py_compile runtime/slicer/app.py
+          python -m compileall -q app
+      - name: Slicer shell syntax
+        run: bash -n runtime/slicer/start.sh
+      - name: Runtime version markers
+        run: |
+          grep -F "2.51.0-motion-exact-prefilter" runtime/heavy/app.py
+          grep -F "2.10.5-universal-static" runtime/cad-core-v5/app.py
+          grep -F "1.1.11" runtime/slicer/app.py
+          grep -F "3.0.0-interface-adapters" app/main.py
+      - name: No source-chunk dependency in packaged runtimes
+        run: |
+          ! grep -R "WORKER_SRC_" runtime/heavy runtime/cad-core-v5
+          ! grep -R "SLICER_SRC_" runtime/slicer
