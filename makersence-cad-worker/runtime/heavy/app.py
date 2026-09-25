@@ -1149,246 +1149,6 @@ def universal_cad_recipe(c):
     if shape_volume(shape)<=1e-3:raise ValueError("UNIVERSAL_RECIPE_ZERO_VOLUME")
     return [{"name":"BODY","role":"main_body","physical_separate":True,"editable_separate":True,"color":color_hex(c.get("body_color") or "#6d7480"),"shape":shape,"geom":None,"min_feature_mm":max(.8,f(c.get("wall_mm"),.8))}]
 
-def static_functional_utensil_vessel(c):
-    kind=str(c.get("functional_type") or "").strip().lower()
-    if kind!="scoop_vessel":raise ValueError("STATIC_FUNCTIONAL_TYPE_UNSUPPORTED:"+kind)
-    outer_d=max(40.0,f(c.get("outer_diameter_mm"),76))
-    cup_h=max(18.0,f(c.get("cup_height_mm"),40))
-    wall=max(1.6,f(c.get("wall_mm"),2.6))
-    floor=max(1.6,f(c.get("floor_mm"),2.8))
-    handle_len=max(35.0,f(c.get("handle_length_mm"),82))
-    handle_w=max(12.0,f(c.get("handle_width_mm"),22))
-    handle_t=max(3.0,f(c.get("handle_thickness_mm"),7))
-    overlap=max(3.0,f(c.get("handle_overlap_mm"),12))
-    if outer_d<=wall*2+8:raise ValueError("STATIC_VESSEL_WALL_INVALID")
-    if cup_h<=floor+8:raise ValueError("STATIC_VESSEL_FLOOR_INVALID")
-    inner_d=outer_d-2*wall
-    overall=outer_d+handle_len-overlap
-
-    outer=cq.Workplane("XY").circle(outer_d/2).extrude(cup_h)
-    handle_start=outer_d/2-overlap
-    handle_center=handle_start+handle_len/2
-    handle=rounded_box(handle_w,handle_len,handle_t,min(3.0,handle_w*.18)).translate((0,handle_center,0))
-    neck_w=min(outer_d*.72,max(handle_w*1.55,outer_d*.42))
-    neck_d=max(overlap*1.8,16.0)
-    neck_h=max(handle_t+1.6,min(cup_h*.30,handle_t*1.55))
-    neck_y=outer_d/2-overlap*.55
-    neck=rounded_box(neck_w,neck_d,neck_h,min(4.0,neck_w*.16)).translate((0,neck_y,0))
-    body=outer.union(handle).union(neck)
-    cavity=cq.Workplane("XY").workplane(offset=floor).circle(inner_d/2).extrude(cup_h-floor+.6)
-    body=body.cut(cavity)
-    if body.val().isNull() or not body.val().isValid():raise ValueError("STATIC_VESSEL_BREP_INVALID")
-
-    parts=[{"name":"BODY","role":"functional_body","physical_separate":True,"editable_separate":True,
-            "color":color_hex(c.get("body_color") or "#b89165"),"shape":body,"geom":None,"min_feature_mm":wall}]
-    if bool(c.get("paw_relief",False)):
-        relief_h=max(.6,min(1.2,f(c.get("paw_relief_height_mm"),.8)))
-        relief_y=handle_start+handle_len*.67
-        accent=cq.Workplane("XY").ellipse(min(5.4,handle_w*.24),min(4.2,handle_w*.19)).extrude(relief_h)
-        toe_r=max(1.25,min(2.0,handle_w*.075))
-        for dx,dy in [(-handle_w*.24,4.2),(-handle_w*.08,5.8),(handle_w*.08,5.8),(handle_w*.24,4.2)]:
-            accent=accent.union(cq.Workplane("XY").center(dx,dy).circle(toe_r).extrude(relief_h))
-        accent=accent.translate((0,relief_y,handle_t))
-        if accent.val().isValid():
-            parts.append({"name":"PAW_RELIEF","role":"semantic_relief","physical_separate":False,"editable_separate":True,
-                          "color":color_hex(c.get("relief_color") or "#f2dfc4"),"shape":accent,"geom":None,"min_feature_mm":.8})
-
-    capacity=math.pi*(inner_d/2)**2*max(0,cup_h-floor)/1000
-    target=f(c.get("target_capacity_ml"),0)
-    if target>0:
-        err=abs(capacity-target)/target*100
-        if err>8:raise ValueError("STATIC_CAPACITY_MISMATCH:"+str(round(capacity,1))+":"+str(round(target,1)))
-    return parts
-
-
-BLENDER_BIN=os.environ.get("BLENDER_BIN","/usr/bin/blender")
-BLENDER_BONE_SCRIPT=r'''
-import bpy, json, sys
-from mathutils.geometry import interpolate_bezier
-args=sys.argv[sys.argv.index("--")+1:]
-spec=json.load(open(args[0],encoding="utf-8"))
-out_path,blend_path=args[1],args[2]
-width,height,body_t=map(float,(spec["width_mm"],spec["height_mm"],spec["body_thickness_mm"]))
-# Canonical horizontal bone: narrow central shaft, two rounded lobes at each end,
-# no artificial top tab. Symmetry is deliberate so the silhouette reads before decoration.
-anchors=[
-(-.43,0),(-.48,.10),(-.50,.22),(-.48,.34),(-.43,.44),(-.36,.50),(-.29,.49),(-.24,.44),(-.23,.39),(-.25,.35),(-.20,.33),(-.10,.34),
-(.10,.34),(.20,.33),(.25,.35),(.23,.39),(.24,.44),(.29,.49),(.36,.50),(.43,.44),(.48,.34),(.50,.22),(.48,.10),(.43,0),
-(.48,-.10),(.50,-.22),(.48,-.34),(.43,-.44),(.36,-.50),(.29,-.49),(.24,-.44),(.23,-.39),(.25,-.35),(.20,-.33),(.10,-.34),
-(-.10,-.34),(-.20,-.33),(-.25,-.35),(-.23,-.39),(-.24,-.44),(-.29,-.49),(-.36,-.50),(-.43,-.44),(-.48,-.34),(-.50,-.22),(-.48,-.10)
-]
-bpy.ops.object.select_all(action="SELECT")
-bpy.ops.object.delete(use_global=False)
-curve=bpy.data.curves.new("Bone_Sculptural_Contour","CURVE")
-curve.dimensions="2D"
-curve.fill_mode="BOTH"
-curve.extrude=body_t/2
-curve.resolution_u=40
-spline=curve.splines.new("BEZIER")
-spline.bezier_points.add(len(anchors)-1)
-for point,(x,y) in zip(spline.bezier_points,anchors):
-    point.co=(x*width,y*height,0)
-    point.handle_left_type="AUTO"
-    point.handle_right_type="AUTO"
-spline.use_cyclic_u=True
-obj=bpy.data.objects.new("Organic_Bone_Base",curve)
-bpy.context.collection.objects.link(obj)
-bpy.context.view_layer.update()
-points=[]
-for i in range(len(spline.bezier_points)):
-    a=spline.bezier_points[i]
-    b=spline.bezier_points[(i+1)%len(spline.bezier_points)]
-    segment=interpolate_bezier(a.co,a.handle_right,b.handle_left,b.co,20)
-    points.extend((float(v.x),float(v.y)) for v in segment[:-1])
-if len(points)<120:raise RuntimeError("Blender contour is incomplete")
-xmin=min(x for x,y in points);xmax=max(x for x,y in points)
-ymin=min(y for x,y in points);ymax=max(y for x,y in points)
-if xmax-xmin<=0 or ymax-ymin<=0:raise RuntimeError("Blender contour has no area")
-sx=width/(xmax-xmin);sy=height/(ymax-ymin)
-cx=(xmin+xmax)/2;cy=(ymin+ymax)/2
-obj.scale=(sx,sy,1)
-obj.location=(-cx*sx,-cy*sy,body_t/2)
-normalized=[[round((x-cx)*sx,6),round((y-cy)*sy,6)] for x,y in points]
-with open(out_path,"w",encoding="utf-8") as handle:
-    json.dump({"engine":"Blender","blender_version":bpy.app.version_string,"profile":"canonical_bone_v4_refined","outline_points_mm":normalized,"dimensions_mm":[width,height,body_t]},handle)
-bpy.ops.wm.save_as_mainfile(filepath=blend_path,check_existing=False)
-'''
-def hybrid_bone_tag(c,req):
-    if not pathlib.Path(BLENDER_BIN).exists():raise ValueError("BLENDER_EXECUTOR_UNAVAILABLE")
-    target=c.get("product_dimensions_mm") or []
-    if not isinstance(target,list) or len(target)!=3:raise ValueError("HYBRID_TARGET_DIMENSIONS_REQUIRED")
-    width,height,total_h=[f(x) for x in target]
-    if not (38<=width<=175 and 30<=height<=175 and 2.8<=total_h<=12):raise ValueError("HYBRID_BONE_DIMENSIONS_UNSUPPORTED")
-    relief=f(c.get("relief_height_mm"),.65)
-    body_t=total_h-relief
-    pocket_d=f(c.get("nfc_pocket_diameter_mm"),25.5)
-    pocket_depth=f(c.get("nfc_pocket_depth_mm"),1.2)
-    hole_d=f(c.get("keyring_hole_diameter_mm"),4.5)
-    if relief<.55 or relief>1.2 or body_t-pocket_depth<.8 or pocket_d<18 or pocket_d>30 or hole_d<3.5 or hole_d>7:raise ValueError("HYBRID_BONE_FEATURE_DIMENSIONS_UNSUPPORTED")
-    if pocket_d+4>height*.64*2:raise ValueError("HYBRID_BONE_NFC_POCKET_EXCEEDS_WAIST")
-    if width<1.75*pocket_d:raise ValueError("HYBRID_BONE_NFC_POCKET_EXCEEDS_LENGTH")
-    folder=pathlib.Path(req.get("_job_folder") or "")
-    if not folder.is_dir():raise ValueError("HYBRID_JOB_FOLDER_MISSING")
-    param_path=folder/"blender_input.json"
-    profile_path=folder/"blender_profile.json"
-    blend_path=folder/"source.blend"
-    param_path.write_text(json.dumps({"width_mm":width,"height_mm":height,"body_thickness_mm":body_t}),encoding="utf-8")
-    script_path=folder/"blender_profile.py"
-    script_path.write_text(BLENDER_BONE_SCRIPT,encoding="utf-8")
-    run=subprocess.run([BLENDER_BIN,"--background","--factory-startup","--python",str(script_path),"--",str(param_path),str(profile_path),str(blend_path)],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=120)
-    if run.returncode!=0 or not profile_path.exists() or not blend_path.exists():raise ValueError("BLENDER_PROFILE_FAILED:"+run.stdout[-1200:])
-    print("hybrid blender complete",round(current_rss_mb(),1),flush=True)
-    profile=json.loads(profile_path.read_text(encoding="utf-8"))
-    points=profile.get("outline_points_mm") or []
-    if len(points)<120 or any(not isinstance(p,list) or len(p)!=2 for p in points):raise ValueError("BLENDER_PROFILE_INVALID")
-    outline=Polygon(points).buffer(0)
-    if outline.geom_type!="Polygon" or outline.is_empty or not outline.is_valid:raise ValueError("HYBRID_SILHOUETTE_INVALID")
-    pocket_edge_wall=max(1.2,min(1.8,body_t*.35))
-    pocket_envelope=Point(0,0).buffer(pocket_d/2+pocket_edge_wall,resolution=64)
-    if not outline.contains(pocket_envelope):raise ValueError("HYBRID_NFC_POCKET_OUTSIDE_PRODUCT_ENVELOPE")
-    try:body=cq.Workplane("XY").moveTo(*points[0]).spline(points[1:]+[points[0]],includeCurrent=True).close().extrude(body_t)
-    except Exception as ex:raise ValueError("BLENDER_TO_CAD_LOFT_FAILED:"+str(ex))
-    print("hybrid body complete",round(current_rss_mb(),1),flush=True)
-    if width<46 or height<42:raise ValueError("HYBRID_BONE_DETAIL_REQUIRES_AT_LEAST_46x42_MM")
-    hole_x=-width*.39
-    hole_y=height*.29
-    pocket_x=pocket_y=0.0
-    if math.hypot(hole_x-pocket_x,hole_y-pocket_y)-(hole_d+pocket_d)/2<2.0:raise ValueError("HYBRID_BONE_FEATURE_COLLISION")
-    hole=cq.Workplane("XY").workplane(offset=-.1).center(hole_x,hole_y).circle(hole_d/2).extrude(body_t+.2)
-    pocket=cq.Workplane("XY").workplane(offset=-.1).center(pocket_x,pocket_y).circle(pocket_d/2).extrude(pocket_depth+.1)
-    body=body.cut(hole).cut(pocket)
-    if body.val().isNull() or not body.val().isValid():raise ValueError("HYBRID_BONE_BREP_INVALID")
-    if shape_volume(body.intersect(hole))>.001 or shape_volume(body.intersect(pocket))>.001:raise ValueError("HYBRID_BONE_OPENINGS_NOT_CUT")
-    hb=hole.val().BoundingBox();pb=pocket.val().BoundingBox();bb=body.val().BoundingBox()
-    req["_hybrid_measured_dims"]={"nfc_pocket_diameter_mm":round(float(pb.xmax-pb.xmin),4),"nfc_pocket_depth_mm":round(float(pb.zmax-max(0.0,bb.zmin)),4),"keyring_hole_diameter_mm":round(float(hb.xmax-hb.xmin),4),"residual_wall_mm":round(max(0.0,body_t-pocket_depth),4)}
-
-    # Visual hierarchy: silhouette first, one paw as the primary accent, then only a few
-    # restrained surface marks. No invented character face / muzzle / ears.
-    # The primary paw reaches the declared relief height so the final Z dimension
-    # matches the product contract; the border/detail stay subordinate.
-    accent_h=relief
-    detail_h=relief*.28
-    outer=outline.buffer(-.55,join_style=1,resolution=10).simplify(.03,preserve_topology=True)
-    inner=outline.buffer(-1.48,join_style=1,resolution=10).simplify(.03,preserve_topology=True)
-    if outer.geom_type!="Polygon" or inner.geom_type!="Polygon" or outer.is_empty or inner.is_empty:raise ValueError("HYBRID_BORDER_PROFILE_INVALID")
-    ring_outer=cq.Workplane("XY").polyline(list(outer.exterior.coords)[:-1]).close().extrude(relief*.24)
-    ring_inner=cq.Workplane("XY").polyline(list(inner.exterior.coords)[:-1]).close().extrude(relief*.29)
-    ring=ring_outer.cut(ring_inner)
-    if ring.val().isNull() or not ring.val().isValid():raise ValueError("HYBRID_BORDER_BREP_INVALID")
-
-    paw_cy=-height*.035
-    paw_parts=[cq.Workplane("XY").center(0,paw_cy).ellipse(width*.090,height*.062).extrude(accent_h)]
-    toe_r_x=max(.92,min(1.18,width*.023))
-    toe_r_y=max(1.02,min(1.32,height*.026))
-    for dx,dy in [(-3.55,3.15),(-1.18,4.02),(1.18,4.02),(3.55,3.15)]:
-        paw_parts.append(cq.Workplane("XY").center(dx,paw_cy+dy).ellipse(toe_r_x,toe_r_y).extrude(accent_h))
-    paw_compound=cq.Compound.makeCompound([x.val() for x in paw_parts])
-    paw=cq.Workplane("XY").newObject([paw_compound])
-    ring_t=ring.translate((0,0,body_t))
-    paw_t=paw.translate((0,0,body_t))
-    accent_compound=cq.Compound.makeCompound([ring_t.val(),paw_t.val()])
-    accent=cq.Workplane("XY").newObject([accent_compound])
-    if accent.val().isNull() or not accent.val().isValid():raise ValueError("HYBRID_ACCENT_INVALID")
-
-    # A small three-stroke claw/fur cue sits beside the paw, inside the central
-    # body mass. It is intentionally asymmetrical and separated from both the
-    # perimeter border and the paw so it reads as secondary surface detail.
-    detail_x=width*.165
-    detail_y=0.0
-    detail_solids=[]
-    for dx,dy,ang in [(-1.55,-.10,-16),(0,.35,0),(1.55,-.10,16)]:
-        mark=cq.Workplane("XY").ellipse(.46,1.20).extrude(detail_h).rotate((0,0,0),(0,0,1),ang).translate((detail_x+dx,detail_y+dy,body_t))
-        detail_solids.append(mark.val())
-    detail_compound=cq.Compound.makeCompound(detail_solids)
-    detail=cq.Workplane("XY").newObject([detail_compound])
-    if detail.val().isNull() or not detail.val().isValid():raise ValueError("HYBRID_PET_DETAIL_INVALID")
-    print("hybrid refined detail complete",round(current_rss_mb(),1),flush=True)
-
-    outline_poly=outline
-    if outline_poly.geom_type!="Polygon" or outline_poly.is_empty or not outline_poly.is_valid:raise ValueError("HYBRID_SILHOUETTE_INVALID")
-    area_ratio=float(outline_poly.area)/max(1e-9,width*height)
-    hole_margin=max(0.0,float(outline_poly.boundary.distance(Point(hole_x,hole_y)))-hole_d/2)
-    center_span=float(outline_poly.intersection(LineString([(0,-height),(0,height)])).length)
-    left_span=float(outline_poly.intersection(LineString([(-width*.38,-height),(-width*.38,height)])).length)
-    right_span=float(outline_poly.intersection(LineString([(width*.38,-height),(width*.38,height)])).length)
-    end_span=(left_span+right_span)/2.0
-    pbb=paw.val().BoundingBox();dbb=detail.val().BoundingBox()
-    paw_width_ratio=float(pbb.xmax-pbb.xmin)/max(1e-9,width)
-    paw_height_ratio=float(pbb.ymax-pbb.ymin)/max(1e-9,height)
-    detail_width_ratio=float(dbb.xmax-dbb.xmin)/max(1e-9,width)
-    detail_height_ratio=float(dbb.ymax-dbb.ymin)/max(1e-9,height)
-    balance_ok=abs(float(outline_poly.centroid.x))<=width*.015 and abs(float(outline_poly.centroid.y))<=height*.015 and abs(left_span-right_span)<=max(.5,end_span*.04)
-    center_ratio=center_span/max(1e-9,height)
-    end_to_center=end_span/max(1e-9,center_span)
-    canonical_ratio_ok=.58<=center_ratio<=.74 and 1.18<=end_to_center<=1.72
-    req["_hybrid_visual_metrics"]={
-      "profile":"commercial_bone_v4_refined",
-      "silhouette_area_ratio":round(area_ratio,4),
-      "center_vertical_span_mm":round(center_span,3),
-      "end_vertical_span_mm":round(end_span,3),
-      "keyring_edge_margin_mm":round(hole_margin,3),
-      "paw_width_ratio":round(paw_width_ratio,4),
-      "paw_height_ratio":round(paw_height_ratio,4),
-      "surface_detail_width_ratio":round(detail_width_ratio,4),
-      "surface_detail_height_ratio":round(detail_height_ratio,4),
-      "canonical_bone_ratio_ok":bool(canonical_ratio_ok),
-      "center_span_ratio":round(center_ratio,4),
-      "end_to_center_ratio":round(end_to_center,4),
-      "nfc_envelope_edge_wall_mm":round(pocket_edge_wall,3),
-      "nfc_envelope_contained":True,
-      "symmetry_balance_ok":bool(balance_ok),
-      "semantic_scope_ok":True,
-      "silhouette_profile_ok":bool(.42<=area_ratio<=.78 and canonical_ratio_ok and balance_ok),
-      "detail_scale_ok":bool(paw_width_ratio<=.22 and paw_height_ratio<=.19 and detail_width_ratio<=.18 and detail_height_ratio<=.16),
-      "negative_space_ok":bool(hole_margin>=2.0)
-    }
-    req["_blender_profile"]={"engine":"Blender","version":profile.get("blender_version"),"profile":profile.get("profile"),"outline_points":len(points),"source_file":"source.blend"}
-    return [
-        {"name":"BODY","role":"main_body","physical_separate":True,"editable_separate":True,"color":color_hex(c.get("body_color") or "#efe9d9"),"shape":body,"geom":None,"min_feature_mm":.8},
-        {"name":"PET_ACCENT","role":"semantic_relief","physical_separate":False,"editable_separate":True,"border_inner_xy":list(inner.exterior.coords),"paw_bounds_xy":[[float(pbb.xmin),float(pbb.ymin),float(pbb.xmax),float(pbb.ymax)]],"color":color_hex(c.get("accent_color") or "#8b9687"),"shape":accent,"geom":None,"min_feature_mm":.8},
-        {"name":"PET_DETAIL","role":"semantic_relief","physical_separate":False,"editable_separate":True,"color":color_hex(c.get("detail_color") or "#4f5c50"),"shape":detail,"geom":None,"min_feature_mm":.8}
-    ]
-
 def build_cad_family(req):
     c=req.get("cad_contract") or req.get("recipe") or {}
     family=str(c.get("family") or "rounded_plate")
@@ -1421,27 +1181,6 @@ def _part_shape(part,assembled=False):
 
 def _parts_for_bbox(parts,assembled=False):
     return [{**p,"shape":_part_shape(p,assembled)} for p in parts]
-
-def hybrid_overlap(parts,mesh_bounds,tolerance=.01):
-    by={str(b.get("part")):b for b in mesh_bounds}
-    body=by.get("BODY")
-    if not body:raise ValueError("HYBRID_BODY_BOUNDS_MISSING")
-    collisions=[];body_top=float(body["max"][2])
-    for name in ("PET_ACCENT","PET_DETAIL"):
-        b=by.get(name)
-        if not b:raise ValueError("HYBRID_PART_BOUNDS_MISSING:"+name)
-        if float(b["min"][2])<body_top-tolerance:collisions.append({"a":"BODY","b":name,"reason":"mesh_z_intrusion"})
-    accent=by["PET_ACCENT"];detail=by["PET_DETAIL"]
-    overlap=[min(float(accent["max"][i]),float(detail["max"][i]))-max(float(accent["min"][i]),float(detail["min"][i])) for i in range(3)]
-    if all(v>tolerance for v in overlap):
-        accent_part=next((p for p in parts if p.get("name")=="PET_ACCENT"),{})
-        inner_xy=accent_part.get("border_inner_xy") or []
-        paw_bounds=accent_part.get("paw_bounds_xy") or []
-        zone=shapely_box(float(detail["min"][0]),float(detail["min"][1]),float(detail["max"][0]),float(detail["max"][1]))
-        border_clear=bool(len(inner_xy)>=4 and Polygon(inner_xy).buffer(-tolerance).contains(zone))
-        paws_clear=all(not shapely_box(*bounds).intersects(zone) for bounds in paw_bounds)
-        if not (border_clear and paws_clear):collisions.append({"a":"PET_ACCENT","b":"PET_DETAIL","reason":"border_or_paw_overlap","dimensions_mm":[round(v,3) for v in overlap],"border_clear":border_clear,"paws_clear":paws_clear})
-    return collisions
 
 def pair_overlap(parts,assembled=False):
     collisions=[]
@@ -1812,17 +1551,7 @@ def validate_parts(req,parts,svg_geoms,hole_tools,invalid):
         expected_dimensions_mm=[f(c.get("width_mm"),dims[0]),f(c.get("depth_mm"),dims[1]),f(c.get("height_mm"),dims[2])]
         contract_measured_dimensions_mm=list(dims)
         contract_dimensions_ok=all(abs(dims[i]-expected_dimensions_mm[i])<=.05 for i in range(3))
-    elif family=="static_functional_utensil_vessel":
-        outer_d=f(c.get("outer_diameter_mm"),dims[0]);overall=outer_d+f(c.get("handle_length_mm"),80)-f(c.get("handle_overlap_mm"),12);cup_h=f(c.get("cup_height_mm"),dims[2])
-        expected_dimensions_mm=[outer_d,overall,cup_h];contract_measured_dimensions_mm=list(dims)
-        contract_dimensions_ok=all(abs(dims[i]-expected_dimensions_mm[i])<=.45 for i in range(3))
-    elif family=="hybrid_bone_tag":
-        expected_dimensions_mm=[f(x) for x in (c.get("product_dimensions_mm") or [])]
-        mesh_min=[min(float(b["min"][i]) for b in printable_part_bounds) for i in range(3)]
-        mesh_max=[max(float(b["max"][i]) for b in printable_part_bounds) for i in range(3)]
-        contract_measured_dimensions_mm=[round(mesh_max[i]-mesh_min[i],3) for i in range(3)]
-        contract_dimensions_ok=len(expected_dimensions_mm)==3 and all(abs(contract_measured_dimensions_mm[i]-expected_dimensions_mm[i])<=.10 for i in range(3))
-    elif family=="sculpted_lidded_container":
+    elif family=="sculpted_lidded_container":    elif family=="sculpted_lidded_container":
         expected_dimensions_mm=[f(product_dims[i],assembled_dims[i]) for i in range(3)]
         # OCCT BREP BoundingBox can be inflated by curve tolerances on periodic
         # organic splines. The manufactured contour is the tessellated/exported
@@ -2160,8 +1889,7 @@ def render_product_png(req,parts,svg_geoms,path,validation):
     for y in range(H):
         t=y/max(1,H-1);d.line([(0,y),(W,y)],fill=_mix(top,bot,t))
     # Camera = front/top-right; exact geometry is the source, scene dressing is not manufacturing geometry.
-    hybrid_bone=str((req.get("cad_contract") or {}).get("family") or "")=="hybrid_bone_tag"
-    view=_vnorm((0.0,-0.18,1.0) if hybrid_bone else (0.62,-0.70,0.78));right=_vnorm(_vcross((0,0,1),view));up=_vnorm(_vcross(view,right))
+    view=_vnorm((0.62,-0.70,0.78));right=_vnorm(_vcross((0,0,1),view));up=_vnorm(_vcross(view,right))
     mn=[min(v[i] for v in allv) for i in range(3)];mx=[max(v[i] for v in allv) for i in range(3)]
     center=tuple((mn[i]+mx[i])/2 for i in range(3))
     def rawproj(p):
@@ -2229,10 +1957,7 @@ def render_product_png(req,parts,svg_geoms,path,validation):
             # faint glass highlight
             d.line([_quad_point(q,.08,.06),_quad_point(q,.88,.06)],fill=(255,255,255),width=max(2,ss*2))
     if raised:
-        # Compositing known CAD relief layers in height order avoids the triangle
-        # painter algorithm drawing an underlying cheek over an eye or nose.
-        layer_order={"PET_ACCENT":0,"PET_DETAIL":1}
-        for m in sorted(raised,key=lambda item:layer_order.get(str(item.get("name")),4)):
+        for m in raised:
             draw_mesh_set([m])
     # Ground/contact sheen under product.
     d=ImageDraw.Draw(img,"RGBA")
@@ -2262,18 +1987,6 @@ def commercial_visual_gate(req,parts,validation):
       "semantic_geometry_explained":validation.get("part_intent_ok") is True and validation.get("orphan_geometry_free") is True
     }
     metrics={"projected_coverage":round(coverage,4),"family":family,"part_count":len(parts)}
-    if family=="hybrid_bone_tag":
-        vm=req.get("_hybrid_visual_metrics") or {}
-        checks.update({
-          "recognizable_silhouette":vm.get("silhouette_profile_ok") is True,
-          "canonical_bone_proportion":vm.get("canonical_bone_ratio_ok") is True,
-          "symmetry_balance":vm.get("symmetry_balance_ok") is True,
-          "semantic_scope":vm.get("semantic_scope_ok") is True,
-          "integrated_keyring_hole":f(vm.get("keyring_edge_margin_mm"),0)>=2.0,
-          "balanced_detail_scale":vm.get("detail_scale_ok") is True,
-          "negative_space_preserved":vm.get("negative_space_ok") is True
-        })
-        metrics.update(vm)
     ok=all(v is True for v in checks.values())
     return {
       "status":"PASS" if ok else "FAIL",
@@ -2485,38 +2198,6 @@ def _run_generate_job_inner(jid,req,folder):
         JOBS[jid].update({"stage":"validating","updated_at":time.time()})
         rss_built=memory_guard(req,"build_done",hard=True)
         validation=validate_parts(req,parts,svg_geoms,hole_tools,invalid)
-        if (req.get("cad_contract") or {}).get("family")=="hybrid_bone_tag":
-            validation["blender_hybrid"]=req.get("_blender_profile") or {"status":"FAIL"}
-            validation["blender_hybrid_ok"]=bool(req.get("_blender_profile")) and (folder/"source.blend").is_file()
-            contract=req.get("cad_contract") or {}
-            actual=dict(req.get("_hybrid_measured_dims") or {})
-            bounds=validation.get("printable_part_bounds") or []
-            base=next((b for b in bounds if b.get("part")=="BODY"),None)
-            if base and bounds:
-                base_top=float(base["max"][2])
-                actual["relief_height_mm"]=round(max(float(b["max"][2]) for b in bounds)-base_top,4)
-            key_checks=[]
-            for item in contract.get("key_dimension_targets") or []:
-                field=str(item.get("contract_field") or "")
-                expected=f(item.get("value_mm"))
-                tolerance=f(item.get("tolerance_mm"))
-                measured=actual.get(field)
-                key_checks.append({"name":item.get("name"),"field":field,"target_mm":expected,"actual_mm":measured,"tolerance_mm":tolerance,"ok":measured is not None and abs(measured-expected)<=tolerance+1e-6})
-            measured_dims=validation.get("contract_measured_dimensions_mm") or []
-            target_dims=contract.get("product_dimensions_mm") or []
-            if len(measured_dims)==3 and len(target_dims)==3:
-                for axis,index in (("X",0),("Y",1),("Z",2)):
-                    measured=float(measured_dims[index]);target=float(target_dims[index]);key_checks.append({"name":"成品 "+axis,"field":"product_dimensions_mm."+axis,"target_mm":target,"actual_mm":measured,"tolerance_mm":.35,"ok":abs(measured-target)<=.35})
-            names={str(p.get("name") or "") for p in parts}
-            allowed_names={"BODY","PET_ACCENT","PET_DETAIL"}
-            appearance_scope_ok=names==allowed_names
-            validation["appearance_scope_gate"]={"status":"PASS" if appearance_scope_ok else "FAIL","actual_parts":sorted(names),"allowed_parts":sorted(allowed_names),"policy":"Only concept-backed semantic geometry may be emitted; unrequested character faces, mascots or ornaments are forbidden."}
-            validation["appearance_scope_ok"]=appearance_scope_ok
-            signature_evidence={"bone_silhouette":validation["blender_hybrid_ok"] and "BODY" in names,"paw_pad_relief":"PET_ACCENT" in names,"pet_surface_detail":"PET_DETAIL" in names,"nfc_zone":"BODY" in names and bool((contract.get("pockets") or []))}
-            signature_checks=[{"signature_id":sid,"status":"PASS" if signature_evidence.get(str(sid)) else "FAIL"} for sid in (contract.get("required_signature_ids") or [])]
-            signature_ok=bool(signature_checks) and all(x["status"]=="PASS" for x in signature_checks) and all(x["ok"] for x in key_checks)
-            validation["hybrid_signature_gate"]={"status":"PASS" if signature_ok else "FAIL","checks":signature_checks,"key_dimensions":key_checks,"source":"verified_blender_profile_and_cad_feature_operations"}
-            validation["hybrid_signature_ok"]=signature_ok
         released_after_validation=release_process_memory(parts)
         rss_validated=memory_guard(req,"validation_done",hard=True)
         validation["tessellation_cache_released"]=bool(released_after_validation.get("cache_cleaned"))
@@ -4160,7 +3841,7 @@ class Handler(BaseHTTPRequestHandler):
         return True
     def do_GET(self):
         path=urlparse(self.path).path
-        if path=="/health":return self.send_json(200,{"ok":True,"service":"makersence-cad-worker","version":"2.55.0-generic-runtime-cleanup","engine":"cadquery+blender+svgpathtools+shapely+pillow","blender":{"available":pathlib.Path(BLENDER_BIN).exists(),"binary":BLENDER_BIN},"bambu_slicer":{"available":bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),"engine":"Bambu Studio","version":BAMBU_VERSION},"capabilities":["compact_step_brep","bambu_native_parts","detachable_parts","assembly_render","product_dimensions","open_edges_zero_gate","formal_mesh_render","artifact_reaudit","rectangular_blind_pockets","geometry_intent_gate","orphan_geometry_gate","unintended_through_cut_gate","welded_3mf_meshes","exported_3mf_topology_gate","true_font_outline_text","high_smooth_vector_mesh","multilingual_font_fallback","actual_text_stroke_gate","adaptive_cjk_regular_first","cjk_internal_clearance_gate","cjk_counter_preservation_gate","text_mesh_topology_candidate_gate","remote_3mf_stream_analyzer","remote_3mf_xml_iterparse","remote_3mf_transform_aware_bounds","remote_3mf_cad_drawing_v1","remote_3mf_reconstruction_sections_v2","auto_hole_slot_detection","blind_cavity_detection_v1","planar_face_cluster_locator_v1","cavity_bottom_face_match_v1","residual_wall_normal_distance_v1","paired_plane_thickness_v1","bounded_per_part_feature_scan_v1","auto_fillet_chamfer_candidates","auto_section_view_plan","multipart_dimension_semantics","supplementary_stl_step_analyzer","sculpted_lidded_container_v1","smooth_pumpkin_container_v2","generic_memory_budget_v1","streaming_3mf_glb_export","source_3mf_glb_preview_v1","world_space_feature_center_v1","auto_text_boldening","typography_layout_bounds","script_aware_glyph_spacing","glyph_clearance_gate","text_readability_gate","bambu_04_text_profile","text_slicer_no_merge_gate","separate_structural_text_min_feature","arachne_text_project_settings","bambu_cli_real_slice","gcode_3mf_toolpath_gate","print_ready_plate_3mf","plate_part_coverage_gate","universal_cad_recipe_v2","cad_evidence_parametric_binding_v1","blind_cavity_recipe_cut_v1","planar_design_fidelity_artifact_gate_v1","universal_design_fidelity_artifact_gate_v1","section_loft_reconstruction_v1","section_loft_open_cavity_v2","multipart_relation_rebuild_v1","per_part_reconstruction_evidence_v1","planar_multiloop_extrusion_v1","planar_mesh_projection_fallback_v1","bambu_assembly_metadata_evidence_v1","assembly_pose_solver_v1","assembly_pose_solver_v3","mechanism_pose_brep_probe_v1","mechanism_motion_solver_v1","mechanism_motion_solver_v2","mechanism_motion_solver_v3","hinge_sweep_collision_gate_v1","terminal_stop_refinement_v1","latch_relative_pivot_engagement_v1","motion_bbox_prefilter_v1","motion_memory_checkpoint_v1","motion_exact_separation_prefilter_v1","motion_fail_closed_collision_v1","motion_early_direction_exit_v1","motion_isolated_subprocess_v1","motion_timeout_guard_v1","async_motion_jobs_v1","separate_part_mate_resolver_v1","planar_ring_opening_match_v1","faceted_mesh_brep_v1","complex_topology_mesh_fallback_v1","sealed_internal_cavity_mesh_fallback_v1","multipart_dimension_semantics_v2","source_intended_contact_qa_v1","same_root_assembly_guard_v1","axisymmetric_revolve_reconstruction_v1","bounded_inprocess_universal_jobs_v1","planar_prismatic_reconstruction_v1","commercial_visual_release_gate_v1",],"profiles":["bambu_a1_mini_04"],"universal_executor_probe":{"cavity_loft_policy":UNIVERSAL_CAVITY_LOFT_POLICY,"loft_argcount":_u_loft_from_loops.__code__.co_argcount}})
+        if path=="/health":return self.send_json(200,{"ok":True,"service":"makersence-cad-worker","version":"2.55.0-generic-runtime-cleanup","engine":"cadquery+svgpathtools+shapely+pillow","bambu_slicer":{"available":bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),"engine":"Bambu Studio","version":BAMBU_VERSION},"capabilities":["compact_step_brep","bambu_native_parts","detachable_parts","assembly_render","product_dimensions","open_edges_zero_gate","formal_mesh_render","artifact_reaudit","rectangular_blind_pockets","geometry_intent_gate","orphan_geometry_gate","unintended_through_cut_gate","welded_3mf_meshes","exported_3mf_topology_gate","true_font_outline_text","high_smooth_vector_mesh","multilingual_font_fallback","actual_text_stroke_gate","adaptive_cjk_regular_first","cjk_internal_clearance_gate","cjk_counter_preservation_gate","text_mesh_topology_candidate_gate","remote_3mf_stream_analyzer","remote_3mf_xml_iterparse","remote_3mf_transform_aware_bounds","remote_3mf_cad_drawing_v1","remote_3mf_reconstruction_sections_v2","auto_hole_slot_detection","blind_cavity_detection_v1","planar_face_cluster_locator_v1","cavity_bottom_face_match_v1","residual_wall_normal_distance_v1","paired_plane_thickness_v1","bounded_per_part_feature_scan_v1","auto_fillet_chamfer_candidates","auto_section_view_plan","multipart_dimension_semantics","supplementary_stl_step_analyzer","sculpted_lidded_container_v1","smooth_pumpkin_container_v2","generic_memory_budget_v1","streaming_3mf_glb_export","source_3mf_glb_preview_v1","world_space_feature_center_v1","auto_text_boldening","typography_layout_bounds","script_aware_glyph_spacing","glyph_clearance_gate","text_readability_gate","bambu_04_text_profile","text_slicer_no_merge_gate","separate_structural_text_min_feature","arachne_text_project_settings","bambu_cli_real_slice","gcode_3mf_toolpath_gate","print_ready_plate_3mf","plate_part_coverage_gate","universal_cad_recipe_v2","cad_evidence_parametric_binding_v1","blind_cavity_recipe_cut_v1","planar_design_fidelity_artifact_gate_v1","universal_design_fidelity_artifact_gate_v1","section_loft_reconstruction_v1","section_loft_open_cavity_v2","multipart_relation_rebuild_v1","per_part_reconstruction_evidence_v1","planar_multiloop_extrusion_v1","planar_mesh_projection_fallback_v1","bambu_assembly_metadata_evidence_v1","assembly_pose_solver_v1","assembly_pose_solver_v3","mechanism_pose_brep_probe_v1","mechanism_motion_solver_v1","mechanism_motion_solver_v2","mechanism_motion_solver_v3","hinge_sweep_collision_gate_v1","terminal_stop_refinement_v1","latch_relative_pivot_engagement_v1","motion_bbox_prefilter_v1","motion_memory_checkpoint_v1","motion_exact_separation_prefilter_v1","motion_fail_closed_collision_v1","motion_early_direction_exit_v1","motion_isolated_subprocess_v1","motion_timeout_guard_v1","async_motion_jobs_v1","separate_part_mate_resolver_v1","planar_ring_opening_match_v1","faceted_mesh_brep_v1","complex_topology_mesh_fallback_v1","sealed_internal_cavity_mesh_fallback_v1","multipart_dimension_semantics_v2","source_intended_contact_qa_v1","same_root_assembly_guard_v1","axisymmetric_revolve_reconstruction_v1","bounded_inprocess_universal_jobs_v1","planar_prismatic_reconstruction_v1","commercial_visual_release_gate_v1",],"profiles":["bambu_a1_mini_04"],"universal_executor_probe":{"cavity_loft_policy":UNIVERSAL_CAVITY_LOFT_POLICY,"loft_argcount":_u_loft_from_loops.__code__.co_argcount}})
         if path=="/v1/selftest/face-evidence":
             if not self.authorized():return
             return self.send_json(200,_dw_face_evidence_selftest())
