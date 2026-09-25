@@ -1708,16 +1708,29 @@ def validate_parts(req,parts,svg_geoms,hole_tools,invalid):
     structural_min_ok=all(x["ok"] for x in structural_checks) if structural_checks else True
     if not structural_min_ok:min_ok=False
 
-    smooth_required=str(c.get("curve_quality") or "").lower().startswith("high")
+    curve_quality=str(c.get("curve_quality") or "").lower()
+    smooth_required=curve_quality.startswith("high")
     smooth_checks=[]
-    for sp in (req.get("svg_artifact") or {}).get("parts") or []:
+    svg_parts=(req.get("svg_artifact") or {}).get("parts") or []
+    for sp in svg_parts:
         d=str(sp.get("path_d") or "")
         line_cmds=sum(d.count(ch) for ch in ("L","l"))
         curve_cmds=sum(d.count(ch) for ch in ("A","a","C","c","Q","q","S","s"))
         suspicious=(line_cmds>36 and curve_cmds==0)
-        smooth_checks.append({"part":sp.get("id"),"line_commands":line_cmds,"curve_commands":curve_cmds,"suspected_stair_step_trace":suspicious})
+        smooth_checks.append({"part":sp.get("id"),"method":"svg_curve_commands","line_commands":line_cmds,"curve_commands":curve_cmds,"suspected_stair_step_trace":suspicious,"ok":not suspicious})
     mesh_tol=effective_mesh_tolerance(c)
-    smooth_vector_ok=(not smooth_required) or (mesh_tol<=.05 and not any(x["suspected_stair_step_trace"] for x in smooth_checks))
+    blender_curve_mode=("blender" in curve_quality)
+    if not smooth_required:
+        smooth_vector_ok=True
+    elif svg_parts:
+        smooth_vector_ok=(mesh_tol<=.05 and not any(x.get("suspected_stair_step_trace") for x in smooth_checks))
+    elif blender_curve_mode:
+        blender_smooth_ok=(mesh_tol<=.10)
+        smooth_checks.append({"method":"blender_profile_mesh_tolerance","mesh_tolerance_mm":round(mesh_tol,4),"required_max_mm":.10,"ok":blender_smooth_ok})
+        smooth_vector_ok=blender_smooth_ok
+    else:
+        smooth_checks.append({"method":"missing_smoothness_evidence","ok":False})
+        smooth_vector_ok=False
 
     silhouettes=[g for p,g in svg_geoms if p.get("role")=="silhouette"]
     outer=unary_union(silhouettes) if silhouettes else None
