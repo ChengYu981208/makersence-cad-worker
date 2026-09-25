@@ -30,7 +30,7 @@ jobs:
         run: bash -n runtime/slicer/start.sh
       - name: Runtime version markers
         run: |
-          grep -F "2.55.0-generic-runtime-cleanup" runtime/heavy/app.py
+          grep -F "2.56.0-generic-family-cleanup" runtime/heavy/app.py
           grep -F "2.10.8-generic-cleanup" runtime/cad-core-v5/app.py
           grep -F "1.1.11" runtime/slicer/app.py
           grep -F "3.1.0-manifold-lib3mf" app/main.py
