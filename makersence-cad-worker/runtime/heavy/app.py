@@ -47,11 +47,12 @@ def resource_policy(req):
     p=c.get("resource_policy") or {}
     family=str(c.get("family") or "")
     if family=="universal_cad_recipe":
-        # Railway shadow workers currently have ~1 GB RAM. Keep enough headroom
-        # for OCCT/VTK/Python allocations so one CAD job cannot starve /health.
-        soft=max(520.0,min(700.0,f(p.get("memory_soft_limit_mb"),620)))
-        hard=max(680.0,min(820.0,f(p.get("memory_hard_limit_mb"),760)))
-        if hard<=soft+48:hard=min(820.0,soft+64.0)
+        # Railway production workers have ~1 GB RAM. Keep a conservative cgroup
+        # headroom, but do not reject healthy jobs solely because Python/OCCT RSS
+        # retains shared/native pages above the old 760 MB self-imposed ceiling.
+        soft=max(620.0,min(780.0,f(p.get("memory_soft_limit_mb"),700)))
+        hard=max(820.0,min(920.0,f(p.get("memory_hard_limit_mb"),900)))
+        if hard<=soft+64:hard=min(920.0,soft+96.0)
     else:
         soft=max(640.0,min(900.0,f(p.get("memory_soft_limit_mb"),840)))
         hard=max(800.0,min(968.0,f(p.get("memory_hard_limit_mb"),960)))
@@ -2496,8 +2497,29 @@ def _run_generate_job_inner(jid,req,folder):
 
 def _run_generate_job(jid,req,folder):
     with HEAVY_JOB_SEMAPHORE:
-        memory_guard(req,"generate_start",hard=True)
-        return _run_generate_job_inner(jid,req,folder)
+        try:
+            # Reclaim allocator/native CAD leftovers from the previous job before
+            # applying the admission guard. This matters for long-lived workers.
+            gc.collect();_malloc_trim()
+            memory_guard(req,"generate_start",hard=True)
+            return _run_generate_job_inner(jid,req,folder)
+        except Exception as ex:
+            # Admission failures happen outside _run_generate_job_inner(), so they
+            # must explicitly terminate the public job instead of leaving it stuck
+            # forever in processing/queued.
+            job=JOBS.get(jid) or {}
+            if job.get("status") not in ("completed","failed"):
+                created=float(job.get("created_at") or time.time())
+                msg=str(ex)
+                JOBS[jid].update({"status":"failed","stage":"failed","error":msg,
+                    "validation":{"status":"FAIL","geometry_error":msg},
+                    "artifacts":[],"duration_ms":int((time.time()-created)*1000),
+                    "updated_at":time.time()})
+            print("generate admission failed:",jid,repr(ex),flush=True)
+        finally:
+            # _run_generate_job_inner has returned here, so its local CAD objects
+            # are no longer retained; trim once more to keep sequential jobs flat.
+            gc.collect();_malloc_trim()
 
 def _job_log_tail(path,max_bytes=6000):
     try:
