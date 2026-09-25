@@ -58,12 +58,10 @@ def object_id_map_3mf(path):
 
 def analyze_floating_gcode(path,object_map=None):
     object_map=object_map or {}
-    z=None;obj=None;feature=""
+    z=None;obj=None;relative_e=True;last_e=0.0
     num=r"[-+]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)"
     mapping_comments=[];seen_comments=set()
-    layer_bounds={}
-    floating_blocks=[]
-    current_block=None
+    layer_bounds={};object_layers={};floating_blocks=[];current_block=None
     def add_bbox(rec,x,y,e=0.0):
         if x is not None:
             rec["min_x"]=x if rec.get("min_x") is None else min(rec["min_x"],x)
@@ -72,7 +70,9 @@ def analyze_floating_gcode(path,object_map=None):
             rec["min_y"]=y if rec.get("min_y") is None else min(rec["min_y"],y)
             rec["max_y"]=y if rec.get("max_y") is None else max(rec["max_y"],y)
         rec["moves"]=int(rec.get("moves") or 0)+1
-        if e>0:rec["positive_e"]=float(rec.get("positive_e") or 0.0)+e
+        rec["positive_e"]=float(rec.get("positive_e") or 0.0)+max(0.0,e)
+    def new_bbox():
+        return {"min_x":None,"max_x":None,"min_y":None,"max_y":None,"moves":0,"positive_e":0.0}
     try:
         with open(path,"r",encoding="utf-8",errors="ignore") as fh:
             for raw in fh:
@@ -80,6 +80,13 @@ def analyze_floating_gcode(path,object_map=None):
                 if line.startswith(";") and len(mapping_comments)<160 and any(k in low for k in ("object","label","name","instance")):
                     if line not in seen_comments and len(line)<700:
                         seen_comments.add(line);mapping_comments.append(line)
+                if re.match(r"M83\\b",line,re.I):relative_e=True;continue
+                if re.match(r"M82\\b",line,re.I):relative_e=False;continue
+                m=re.match(r"G92\\b.*(?:^|\\s)E("+num+r")",line,re.I)
+                if m:
+                    try:last_e=float(m.group(1))
+                    except Exception:pass
+                    continue
                 m=re.match(r";\\s*Z_HEIGHT:\\s*("+num+r")",line,re.I)
                 if m:
                     try:z=float(m.group(1))
@@ -90,66 +97,93 @@ def analyze_floating_gcode(path,object_map=None):
                 if m:
                     feature=m.group(1).strip()
                     if "floating" in feature.lower():
-                        current_block={"feature":feature,"object_id":obj,"name":object_map.get(obj or ""),"min_z":z,"max_z":z,
-                                       "min_x":None,"max_x":None,"min_y":None,"max_y":None,"moves":0,"positive_e":0.0}
+                        current_block={"kind":"bambu_floating_feature","feature":feature,"object_id":obj,"name":object_map.get(obj or ""),"min_z":z,"max_z":z,**new_bbox()}
                         floating_blocks.append(current_block)
                     else:current_block=None
                     continue
                 if not re.match(r"G[01]\\b",line,re.I):continue
+                zv=re.search(r"(?:^|\\s)Z("+num+r")",line,re.I)
+                if zv:
+                    try:z=float(zv.group(1))
+                    except Exception:pass
                 xv=re.search(r"(?:^|\\s)X("+num+r")",line,re.I)
                 yv=re.search(r"(?:^|\\s)Y("+num+r")",line,re.I)
                 ev=re.search(r"(?:^|\\s)E("+num+r")",line,re.I)
                 x=float(xv.group(1)) if xv else None;y=float(yv.group(1)) if yv else None
-                e=float(ev.group(1)) if ev else 0.0
-                if e<=0:continue
+                delta_e=0.0
+                if ev:
+                    e=float(ev.group(1))
+                    if relative_e:delta_e=e
+                    else:
+                        delta_e=e-last_e;last_e=e
+                if delta_e<=1e-7:continue
                 if z is not None:
                     zk=round(float(z),3)
-                    rec=layer_bounds.setdefault(zk,{"min_x":None,"max_x":None,"min_y":None,"max_y":None,"moves":0,"positive_e":0.0})
-                    add_bbox(rec,x,y,e)
+                    rec=layer_bounds.setdefault(zk,new_bbox());add_bbox(rec,x,y,delta_e)
+                    okey=obj or "unknown"
+                    orecs=object_layers.setdefault(okey,{})
+                    orec=orecs.setdefault(zk,new_bbox());add_bbox(orec,x,y,delta_e)
                 if current_block is not None:
-                    current_block["min_z"]=z if current_block.get("min_z") is None else min(current_block["min_z"],z if z is not None else current_block["min_z"])
-                    current_block["max_z"]=z if current_block.get("max_z") is None else max(current_block["max_z"],z if z is not None else current_block["max_z"])
-                    add_bbox(current_block,x,y,e)
+                    if z is not None:
+                        current_block["min_z"]=z if current_block.get("min_z") is None else min(current_block["min_z"],z)
+                        current_block["max_z"]=z if current_block.get("max_z") is None else max(current_block["max_z"],z)
+                    add_bbox(current_block,x,y,delta_e)
         zs=sorted(layer_bounds.keys())
-        typical_step=None
         diffs=[round(zs[i]-zs[i-1],3) for i in range(1,len(zs)) if 0<zs[i]-zs[i-1]<=1.0]
-        if diffs:typical_step=sorted(diffs)[len(diffs)//2]
+        typical_step=sorted(diffs)[len(diffs)//2] if diffs else None
         support_gap=max(.35,(typical_step or .2)*1.8)
         def overlaps(a,b,margin=.6):
             if not a or not b:return False
             vals=[a.get("min_x"),a.get("max_x"),a.get("min_y"),a.get("max_y"),b.get("min_x"),b.get("max_x"),b.get("min_y"),b.get("max_y")]
             if any(v is None for v in vals):return False
             return not (a["max_x"]<b["min_x"]-margin or a["min_x"]>b["max_x"]+margin or a["max_y"]<b["min_y"]-margin or a["min_y"]>b["max_y"]+margin)
-        risk_blocks=[]
-        assessed=[]
+        def previous_layer(bz):
+            candidates=[zz for zz in zs if bz is not None and zz<bz and bz-zz<=support_gap]
+            pz=max(candidates) if candidates else None
+            return pz,layer_bounds.get(pz) if pz is not None else None
+        risk_blocks=[];assessed_features=[]
         for block in floating_blocks:
-            bz=block.get("min_z")
-            prev_candidates=[zz for zz in zs if bz is not None and zz<bz and bz-zz<=support_gap]
-            prev_z=max(prev_candidates) if prev_candidates else None
-            prev=layer_bounds.get(prev_z) if prev_z is not None else None
+            bz=block.get("min_z");prev_z,prev=previous_layer(bz)
             supported=(bz is not None and bz<=.6) or overlaps(block,prev,.6)
             risk=bool(block.get("positive_e",0)>0.01 and bz is not None and bz>.6 and not supported)
             row={**block,"positive_e":round(float(block.get("positive_e") or 0.0),5),
                  "previous_layer_z":prev_z,"supported_by_previous_layer":supported,"floating_object_risk":risk}
-            assessed.append(row)
+            assessed_features.append(row)
             if risk:risk_blocks.append(row)
-        feature_detected=any(float(x.get("positive_e") or 0)>0.01 for x in assessed)
+        object_start_checks=[]
+        for oid,layers in object_layers.items():
+            if not layers:continue
+            first_z=min(layers.keys());first=layers[first_z];prev_z,prev=previous_layer(first_z)
+            supported=(first_z<=.6) or overlaps(first,prev,.6)
+            risk=bool(first_z>.6 and float(first.get("positive_e") or 0)>0.01 and not supported)
+            row={"kind":"object_first_extrusion","object_id":oid,"name":object_map.get(oid),"first_z":first_z,
+                 "previous_layer_z":prev_z,"supported_by_previous_layer":supported,"floating_object_risk":risk,
+                 "positive_e":round(float(first.get("positive_e") or 0.0),5),
+                 "min_x":first.get("min_x"),"max_x":first.get("max_x"),"min_y":first.get("min_y"),"max_y":first.get("max_y")}
+            object_start_checks.append(row)
+            if risk:risk_blocks.append(row)
+        feature_detected=any(float(x.get("positive_e") or 0)>0.01 for x in assessed_features)
+        analysis_complete=bool(zs)
         return {
             "detected":feature_detected,
             "floating_feature_detected":feature_detected,
-            "floating_object_risk":bool(risk_blocks),
-            "risk_block_count":len(risk_blocks),
-            "risk_blocks":risk_blocks[:80],
-            "blocks":assessed[:160],
-            "assessment_method":"floating_feature_plus_previous_layer_extrusion_overlap_v2",
+            "analysis_complete":analysis_complete,
+            "floating_object_risk":bool(risk_blocks) if analysis_complete else True,
+            "risk_block_count":len(risk_blocks) if analysis_complete else 1,
+            "risk_blocks":risk_blocks[:80] if analysis_complete else [{"kind":"analysis_incomplete","reason":"no_extrusion_layers_parsed"}],
+            "blocks":assessed_features[:160],
+            "object_start_checks":object_start_checks[:160],
+            "assessment_method":"gcode_object_start_plus_previous_layer_extrusion_overlap_v3",
             "layer_count":len(zs),
+            "min_extrusion_z":min(zs) if zs else None,
+            "max_extrusion_z":max(zs) if zs else None,
             "typical_layer_step_mm":typical_step,
             "object_map":object_map,
             "mapping_comments":mapping_comments
         }
     except Exception as e:
-        return {"detected":False,"floating_feature_detected":False,"floating_object_risk":True,
-                "risk_block_count":1,"risk_blocks":[{"error":str(e)}],
+        return {"detected":False,"floating_feature_detected":False,"analysis_complete":False,"floating_object_risk":True,
+                "risk_block_count":1,"risk_blocks":[{"kind":"analysis_error","error":str(e)}],
                 "assessment_method":"floating_analysis_error_fail_closed","error":str(e),"object_map":object_map}
 
 def inspect_3mf(path):
