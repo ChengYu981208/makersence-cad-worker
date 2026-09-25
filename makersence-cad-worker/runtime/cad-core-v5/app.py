@@ -32,6 +32,7 @@ TEXT_LATIN_GAP_DEFAULT=0.50
 TEXT_CJK_GAP_DEFAULT=0.55
 TEXT_CJK_INTERNAL_GAP_DEFAULT=0.46
 MAX_COLORS_DEFAULT=4
+LEGACY_DISABLED_FAMILIES={"static_functional_utensil_vessel","sculpted_lidded_container"}
 HEAVY_JOB_SEMAPHORE=threading.Semaphore(max(1,int(os.environ.get("MAKERSENCE_HEAVY_CONCURRENCY","1"))))
 
 def current_rss_mb():
@@ -68,7 +69,6 @@ def effective_mesh_tolerance(c):
     # A1 mini 0.4 mm: 0.05 mm chord tolerance is already substantially finer
     # than printable XY detail. Keeping complex organic surfaces below this
     # multiplies tessellation RAM without improving the printed contour.
-    if family=="sculpted_lidded_container":return max(.05,requested)
     if family=="universal_cad_recipe":return max(.08,requested)
     return requested
 
@@ -77,7 +77,6 @@ def effective_validation_mesh_tolerance(c):
     family=str((c or {}).get("family") or "")
     # Intermediate QA mesh may be coarser because the exported 3MF is audited
     # again at export_tol. BREP validity, clearances and collisions remain CAD-based.
-    if family=="sculpted_lidded_container":return max(.08,export_tol)
     if family=="universal_cad_recipe":return max(.12,export_tol)
     return export_tol
 
@@ -801,56 +800,6 @@ def _lobed_loft(width,depth,sections,lobes=8,amp=.07,phase=0.0,max_points=72):
         z=f(z);wp=wp.workplane(offset=z-last).spline(_lobed_profile_points(width,depth,lobes,amp*f(aa,1),samples,f(sc,1),phase,max_points),periodic=True,makeWire=True);last=z
     return wp.loft(combine=True,ruled=False)
 
-def sculpted_lidded_container(c):
-    p=c.get("family_parameters") or {}
-    w=f(c.get("width_mm"),128);d=f(c.get("height_mm"),123);body_h=f(p.get("body_height_mm"),62)
-    floor=f(p.get("floor_mm"),3.2);lobes=int(f(p.get("lobe_count"),8))
-    ow=f(p.get("opening_width_mm"),w*.66);od=f(p.get("opening_depth_mm"),d*.66)
-    lw=f(p.get("lid_width_mm"),w*.80);ld=f(p.get("lid_depth_mm"),d*.80);lh=f(p.get("lid_height_mm"),13)
-    lid_shell=max(2.2,f(p.get("lid_shell_mm"),2.8));lid_skirt=max(2.2,f(p.get("lid_skirt_mm"),2.8));lid_eng=max(3.0,f(p.get("lid_engagement_depth_mm"),4.0))
-    sw=f(p.get("stem_width_mm"),min(w,d)*.14);sd=f(p.get("stem_depth_mm"),sw*.82);sh=f(p.get("stem_height_mm"),9)
-    stem_joint_d=max(5.0,f(p.get("stem_joint_diameter_mm"),6.4));stem_eng=max(3.0,f(p.get("stem_engagement_mm"),4.0));stem_clear=max(.15,f(p.get("stem_joint_clearance_mm"),.22))
-    clear=max(.20,f(p.get("lid_radial_clearance_mm"),f(c.get("xy_clearance_mm"),.25)));wall=max(2.4,f(c.get("wall_mm"),2.8))
-    theme=str(p.get("theme_id") or "")
-    pumpkin=theme in ("halloween_pumpkin","pumpkin_autumn")
-    amp=.075 if pumpkin else .055
-    rp=c.get("resource_policy") or {}
-    max_curve_points=max(24,min(120,int(f(rp.get("max_curve_control_points"),72))))
-    # Organic gourd body: broad equator, compressed poles, true periodic B-spline lobes.
-    body=_lobed_loft(w,d,[(0,.74,.55),(body_h*.16,.92,.90),(body_h*.45,1.0,1.0),(body_h*.71,.97,1.0),(body_h*.90,.86,.82),(body_h,.76,.55)],lobes,amp,max_points=max_curve_points)
-    cavity=cq.Workplane("XY").workplane(offset=floor).ellipse(ow/2,od/2).extrude(body_h-floor+1.0)
-    body=body.cut(cavity)
-    # Lid: same lobe phase as body. The seam lands at the pumpkin shoulder and the skirt enters the body opening.
-    cap=_lobed_loft(lw,ld,[(lid_eng,1.0,.95),(lid_eng+lh*.40,.96,.90),(lid_eng+lh*.72,.82,.75),(lid_eng+lh,.60,.40)],lobes,amp,max_points=max_curve_points)
-    inner=_lobed_loft(max(20,lw-2*lid_shell),max(20,ld-2*lid_shell),[(lid_eng-.05,.98,.85),(lid_eng+lh*.38,.94,.80),(lid_eng+max(1.0,lh-lid_shell),.65,.45)],lobes,max(.035,amp*.8),max_points=max_curve_points)
-    lid=cap.cut(inner)
-    skirt_ow=max(20,ow-2*clear);skirt_od=max(20,od-2*clear)
-    if skirt_ow<=2*lid_skirt+2 or skirt_od<=2*lid_skirt+2:raise ValueError("lid skirt too thick for opening")
-    skirt_outer=cq.Workplane("XY").ellipse(skirt_ow/2,skirt_od/2).extrude(lid_eng)
-    skirt_inner=cq.Workplane("XY").workplane(offset=-.05).ellipse((skirt_ow-2*lid_skirt)/2,(skirt_od-2*lid_skirt)/2).extrude(lid_eng+.1)
-    lid=lid.union(skirt_outer.cut(skirt_inner))
-    # Reinforced socket under the stem so the visible top shell is not weakened by the detachable stem.
-    boss_h=stem_eng+max(2.2,lid_shell*.9);boss_d=stem_joint_d+max(5.0,lid_shell*2.0)
-    boss_z=lid_eng+lh-boss_h
-    lid=lid.union(cq.Workplane("XY").workplane(offset=boss_z).circle(boss_d/2).extrude(boss_h))
-    socket_d=stem_joint_d+2*stem_clear
-    socket_z=lid_eng+lh-stem_eng-.15
-    lid=lid.cut(cq.Workplane("XY").workplane(offset=socket_z).circle(socket_d/2).extrude(stem_eng+.30))
-    # Stem: printable peg + gently leaning organic grip. The peg gives a real locating/adhesive joint.
-    peg=cq.Workplane("XY").circle(stem_joint_d/2).extrude(stem_eng)
-    visible=(cq.Workplane("XY").workplane(offset=stem_eng).ellipse(sw*.48,sd*.48)
-             .workplane(offset=sh*.45).center(sw*.035,0).ellipse(sw*.38,sd*.38)
-             .workplane(offset=sh*.35).center(sw*.055,0).ellipse(sw*.29,sd*.29)
-             .workplane(offset=sh*.20).center(sw*.05,0).ellipse(sw*.19,sd*.19).loft(combine=True,ruled=False))
-    stem=peg.union(visible)
-    body=_seat_on_z0(body);lid=_seat_on_z0(lid);stem=_seat_on_z0(stem)
-    body_color=color_hex(p.get("body_color") or "#d77a2b");lid_color=color_hex(p.get("lid_color") or body_color);stem_color=color_hex(p.get("stem_color") or "#4f6a39")
-    return [
-      {"name":"BODY","role":"main_body","physical_separate":True,"editable_separate":True,"color":body_color,"shape":body,"geom":None,"min_feature_mm":wall,"assembly_translate":[0,0,0]},
-      {"name":"LID","role":"back_cover","physical_separate":True,"editable_separate":True,"color":lid_color,"shape":lid,"geom":None,"min_feature_mm":min(lid_shell,lid_skirt),"assembly_translate":[0,0,body_h-lid_eng]},
-      {"name":"STEM","role":"insert","physical_separate":True,"editable_separate":True,"color":stem_color,"shape":stem,"geom":None,"min_feature_mm":max(.8,min(stem_joint_d,sw,sd)*.45),"assembly_translate":[0,0,body_h+lh-stem_eng]}
-    ]
-
 def _u_signed_area(loop):
     pts=list(loop or [])
     if len(pts)<3:return 0.0
@@ -1047,63 +996,11 @@ def universal_cad_recipe(c):
     if shape_volume(shape)<=1e-3:raise ValueError("UNIVERSAL_RECIPE_ZERO_VOLUME")
     return [{"name":"BODY","role":"main_body","physical_separate":True,"editable_separate":True,"color":color_hex(c.get("body_color") or "#6d7480"),"shape":shape,"geom":None,"min_feature_mm":max(.8,f(c.get("wall_mm"),.8))}]
 
-def static_functional_utensil_vessel(c):
-    kind=str(c.get("functional_type") or "").strip().lower()
-    if kind!="scoop_vessel":raise ValueError("STATIC_FUNCTIONAL_TYPE_UNSUPPORTED:"+kind)
-    outer_d=max(40.0,f(c.get("outer_diameter_mm"),76))
-    cup_h=max(18.0,f(c.get("cup_height_mm"),40))
-    wall=max(1.6,f(c.get("wall_mm"),2.6))
-    floor=max(1.6,f(c.get("floor_mm"),2.8))
-    handle_len=max(35.0,f(c.get("handle_length_mm"),82))
-    handle_w=max(12.0,f(c.get("handle_width_mm"),22))
-    handle_t=max(3.0,f(c.get("handle_thickness_mm"),7))
-    overlap=max(3.0,f(c.get("handle_overlap_mm"),12))
-    if outer_d<=wall*2+8:raise ValueError("STATIC_VESSEL_WALL_INVALID")
-    if cup_h<=floor+8:raise ValueError("STATIC_VESSEL_FLOOR_INVALID")
-    inner_d=outer_d-2*wall
-    overall=outer_d+handle_len-overlap
-
-    outer=cq.Workplane("XY").circle(outer_d/2).extrude(cup_h)
-    handle_start=outer_d/2-overlap
-    handle_center=handle_start+handle_len/2
-    handle=rounded_box(handle_w,handle_len,handle_t,min(3.0,handle_w*.18)).translate((0,handle_center,0))
-    neck_w=min(outer_d*.72,max(handle_w*1.55,outer_d*.42))
-    neck_d=max(overlap*1.8,16.0)
-    neck_h=max(handle_t+1.6,min(cup_h*.30,handle_t*1.55))
-    neck_y=outer_d/2-overlap*.55
-    neck=rounded_box(neck_w,neck_d,neck_h,min(4.0,neck_w*.16)).translate((0,neck_y,0))
-    body=outer.union(handle).union(neck)
-    cavity=cq.Workplane("XY").workplane(offset=floor).circle(inner_d/2).extrude(cup_h-floor+.6)
-    body=body.cut(cavity)
-    if body.val().isNull() or not body.val().isValid():raise ValueError("STATIC_VESSEL_BREP_INVALID")
-
-    parts=[{"name":"BODY","role":"functional_body","physical_separate":True,"editable_separate":True,
-            "color":color_hex(c.get("body_color") or "#b89165"),"shape":body,"geom":None,"min_feature_mm":wall}]
-    if bool(c.get("paw_relief",False)):
-        relief_h=max(.6,min(1.2,f(c.get("paw_relief_height_mm"),.8)))
-        relief_y=handle_start+handle_len*.67
-        accent=cq.Workplane("XY").ellipse(min(5.4,handle_w*.24),min(4.2,handle_w*.19)).extrude(relief_h)
-        toe_r=max(1.25,min(2.0,handle_w*.075))
-        for dx,dy in [(-handle_w*.24,4.2),(-handle_w*.08,5.8),(handle_w*.08,5.8),(handle_w*.24,4.2)]:
-            accent=accent.union(cq.Workplane("XY").center(dx,dy).circle(toe_r).extrude(relief_h))
-        accent=accent.translate((0,relief_y,handle_t))
-        if accent.val().isValid():
-            parts.append({"name":"PAW_RELIEF","role":"semantic_relief","physical_separate":False,"editable_separate":True,
-                          "color":color_hex(c.get("relief_color") or "#f2dfc4"),"shape":accent,"geom":None,"min_feature_mm":.8})
-
-    capacity=math.pi*(inner_d/2)**2*max(0,cup_h-floor)/1000
-    target=f(c.get("target_capacity_ml"),0)
-    if target>0:
-        err=abs(capacity-target)/target*100
-        if err>8:raise ValueError("STATIC_CAPACITY_MISMATCH:"+str(round(capacity,1))+":"+str(round(target,1)))
-    return parts
-
 def build_cad_family(req):
     c=req.get("cad_contract") or req.get("recipe") or {}
     family=str(c.get("family") or "rounded_plate")
+    if family in LEGACY_DISABLED_FAMILIES:raise ValueError("LEGACY_PRODUCT_PROFILE_DISABLED:"+family)
     if family=="universal_cad_recipe":return universal_cad_recipe(c),[],[],[]
-    if family=="static_functional_utensil_vessel":return static_functional_utensil_vessel(c),[],[],[]
-    if family=="sculpted_lidded_container":return sculpted_lidded_container(c),[],[],[]
     if family=="open_box":base=open_box(c)
     elif family=="phone_stand":base=phone_stand(c)
     elif family=="primitive_recipe":base=primitive_recipe(c)
@@ -1192,7 +1089,7 @@ def validate_parts(req,parts,svg_geoms,hole_tools,invalid):
     nozzle=f(profile.get("nozzle_mm"),.4);nozzle_ok=abs(nozzle-.4)<=1e-6
 
     family=str(c.get("family") or "")
-    assembled_family=family in ("sculpted_lidded_container",)
+    assembled_family=False
     valid=all(bool(p["shape"].val().isValid()) for p in parts)
     print_tol=effective_validation_mesh_tolerance(c)
     topo,printable_part_bounds,fingerprint=mesh_validation_summaries(parts,print_tol)
@@ -1334,27 +1231,6 @@ def validate_parts(req,parts,svg_geoms,hole_tools,invalid):
         expected_dimensions_mm=[f(c.get("width_mm"),dims[0]),f(c.get("depth_mm"),dims[1]),f(c.get("height_mm"),dims[2])]
         contract_measured_dimensions_mm=list(dims)
         contract_dimensions_ok=all(abs(dims[i]-expected_dimensions_mm[i])<=.05 for i in range(3))
-    elif family=="static_functional_utensil_vessel":
-        outer_d=f(c.get("outer_diameter_mm"),dims[0]);overall=outer_d+f(c.get("handle_length_mm"),80)-f(c.get("handle_overlap_mm"),12);cup_h=f(c.get("cup_height_mm"),dims[2])
-        expected_dimensions_mm=[outer_d,overall,cup_h];contract_measured_dimensions_mm=list(dims)
-        contract_dimensions_ok=all(abs(dims[i]-expected_dimensions_mm[i])<=.45 for i in range(3))
-    elif family=="sculpted_lidded_container":
-        expected_dimensions_mm=[f(product_dims[i],assembled_dims[i]) for i in range(3)]
-        # OCCT BREP BoundingBox can be inflated by curve tolerances on periodic
-        # organic splines. The manufactured contour is the tessellated/exported
-        # surface, so use the already-audited validation mesh bounds plus the
-        # formal assembly transforms here. Final 3MF receives a second export audit.
-        mn=[float("inf")]*3;mx=[float("-inf")]*3;seen=False
-        for b in printable_part_bounds:
-            p=part_by_name.get(str(b.get("part") or "")) or {}
-            at=p.get("assembly_translate") or [0,0,0]
-            tr=[f(at[i]) if isinstance(at,list) and len(at)==3 else 0.0 for i in range(3)]
-            for i in range(3):
-                mn[i]=min(mn[i],f((b.get("min") or [0,0,0])[i])+tr[i])
-                mx[i]=max(mx[i],f((b.get("max") or [0,0,0])[i])+tr[i])
-            seen=True
-        contract_measured_dimensions_mm=[round(mx[i]-mn[i],6) for i in range(3)] if seen else list(assembled_dims)
-        contract_dimensions_ok=all(abs(contract_measured_dimensions_mm[i]-expected_dimensions_mm[i])<=.35 for i in range(3))
     universal_fidelity=None
     if family=="universal_cad_recipe":
         plan=c.get("universal_recipe") or c.get("recipe") or {}
@@ -1389,7 +1265,7 @@ def validate_parts(req,parts,svg_geoms,hole_tools,invalid):
             through_intent_checks.append({"name":p.get("id"),"purpose":meta.get("purpose"),"declared_through":meta.get("through"),"ok":intent_ok})
     unintended_through_cut_free=all(x.get("ok") is True for x in through_intent_checks) and all((x.get("declared_through") is False and x.get("floor_mm",0)+1e-6>=x.get("required_floor_mm",min_feature)) for x in pocket_checks)
     appearance_hash_match=(req.get("appearance_lock") or {}).get("appearance_hash")==req.get("appearance_hash") and bool(req.get("appearance_hash"))
-    known_support_free=family in ("silhouette_plate","rounded_plate","keychain_plate","nfc_keychain","open_box","phone_stand","sculpted_lidded_container","static_functional_utensil_vessel")
+    known_support_free=family in ("silhouette_plate","rounded_plate","keychain_plate","nfc_keychain","open_box","phone_stand")
     support_deferred=family=="universal_cad_recipe"
     support_required=not known_support_free
     island_free=feature_containment_ok
@@ -1795,7 +1671,7 @@ def export_print_plate_3mfs(req,parts,folder,tol):
 
 def export_all(req,parts,svg_geoms,folder,validation):
     family=str((req.get("cad_contract") or {}).get("family") or "")
-    assembled_export=family in ("sculpted_lidded_container",)
+    assembled_export=False
     stl=folder/"model.stl";step=folder/"model.step";mf=folder/"model.3mf";glb=folder/"preview.glb";png=folder/"product_render_main.png"
     memory_guard(req,"export_brep_start",hard=True)
     shapes=[_part_shape(p,assembled_export).val() for p in parts]
@@ -1936,7 +1812,7 @@ def _run_generate_job_inner(jid,req,folder):
         validation["tessellation_cache_released"]=bool(released_after_validation.get("cache_cleaned"))
         validation["malloc_trim_after_validation"]=bool(released_after_validation.get("malloc_trim"))
         family=str((req.get("cad_contract") or {}).get("family") or "")
-        assembled_export=family in ("sculpted_lidded_container",)
+        assembled_export=False
         mesh_tol=effective_mesh_tolerance(req.get("cad_contract") or {})
         expected_export_dims=tessellated_dimensions(parts,mesh_tol,assembled=assembled_export)
         release_process_memory(parts);memory_guard(req,"dimension_check_done",hard=True)
@@ -2024,7 +1900,7 @@ def generate(req):
     jid=str(uuid.uuid4());folder=ROOT/jid;folder.mkdir(parents=True,exist_ok=True)
     JOBS[jid]={"status":"processing","stage":"queued","idempotency_key":key,"artifacts":[],"created_at":time.time(),"updated_at":time.time(),"appearance_hash":req.get("appearance_hash")}
     family=str((req.get("cad_contract") or {}).get("family") or "")
-    isolated=family in ("universal_cad_recipe","static_functional_utensil_vessel")
+    isolated=family=="universal_cad_recipe"
     target=_run_generate_job_isolated if isolated else _run_generate_job
     threading.Thread(target=target,args=(jid,req,folder),daemon=True,name=("makersence-iso-" if isolated else "makersence-")+jid[:8]).start()
     return {"job_id":jid,"status":"processing","execution_mode":"isolated_subprocess" if isolated else "in_process"}
@@ -2547,7 +2423,7 @@ def analyze_source_file_bytes(data,fmt):
     return {"format":"STEP","file_size_bytes":len(data),"shape_count":len(shapes),"solid_count":solids,"face_count":faces,"bounds_mm":{"min":[round(x,3) for x in lo],"max":[round(x,3) for x in hi],"dimensions":[round(x,3) for x in dims]},"a1_mini_fit":all(x<=180.0001 for x in dims),"analysis_quality":"CAD_BREP_BOUNDS"}
 
 class Handler(BaseHTTPRequestHandler):
-    server_version="MakerSenceCAD/2.10.5-universal-static"
+    server_version="MakerSenceCAD/2.10.7-generic-cleanup"
     def log_message(self,fmt,*args):print(fmt%args,flush=True)
     def send_json(self,code,obj):
         data=json.dumps(obj,ensure_ascii=False).encode("utf-8")
@@ -2558,7 +2434,7 @@ class Handler(BaseHTTPRequestHandler):
         return True
     def do_GET(self):
         path=urlparse(self.path).path
-        if path=="/health":return self.send_json(200,{"ok":True,"service":"makersence-cad-worker","version":"2.10.6-multiview-render","engine":"cadquery+svgpathtools+shapely+pillow","bambu_slicer":{"available":bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),"engine":"Bambu Studio","version":BAMBU_VERSION},"capabilities":["compact_step_brep","bambu_native_parts","detachable_parts","assembly_render","product_dimensions","open_edges_zero_gate","formal_mesh_render","multi_view_real_geometry_render_v1","artifact_reaudit","rectangular_blind_pockets","geometry_intent_gate","orphan_geometry_gate","unintended_through_cut_gate","welded_3mf_meshes","exported_3mf_topology_gate","true_font_outline_text","high_smooth_vector_mesh","multilingual_font_fallback","actual_text_stroke_gate","adaptive_cjk_regular_first","cjk_internal_clearance_gate","cjk_counter_preservation_gate","text_mesh_topology_candidate_gate","remote_3mf_stream_analyzer","remote_3mf_xml_iterparse","remote_3mf_transform_aware_bounds","remote_3mf_cad_drawing_v1","remote_3mf_reconstruction_sections_v2","auto_hole_slot_detection","auto_fillet_chamfer_candidates","auto_section_view_plan","multipart_dimension_semantics","supplementary_stl_step_analyzer","sculpted_lidded_container_v1","smooth_pumpkin_container_v2","generic_memory_budget_v1","streaming_3mf_glb_export","auto_text_boldening","typography_layout_bounds","script_aware_glyph_spacing","glyph_clearance_gate","text_readability_gate","bambu_04_text_profile","text_slicer_no_merge_gate","separate_structural_text_min_feature","arachne_text_project_settings","bambu_cli_real_slice","gcode_3mf_toolpath_gate","print_ready_plate_3mf","plate_part_coverage_gate","universal_cad_recipe_v2","section_loft_reconstruction_v1","section_loft_open_cavity_v2","axisymmetric_revolve_reconstruction_v1","isolated_universal_jobs_v1","STATIC_FUNCTIONAL_CAD","static_functional_utensil_vessel_v1","planar_prismatic_reconstruction_v1"],"profiles":["bambu_a1_mini_04"]})
+        if path=="/health":return self.send_json(200,{"ok":True,"service":"makersence-cad-worker","version":"2.10.7-generic-cleanup","engine":"cadquery+svgpathtools+shapely+pillow","bambu_slicer":{"available":bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),"engine":"Bambu Studio","version":BAMBU_VERSION},"capabilities":["compact_step_brep","bambu_native_parts","detachable_parts","assembly_render","product_dimensions","open_edges_zero_gate","formal_mesh_render","multi_view_real_geometry_render_v1","artifact_reaudit","rectangular_blind_pockets","geometry_intent_gate","orphan_geometry_gate","unintended_through_cut_gate","welded_3mf_meshes","exported_3mf_topology_gate","true_font_outline_text","high_smooth_vector_mesh","multilingual_font_fallback","actual_text_stroke_gate","adaptive_cjk_regular_first","cjk_internal_clearance_gate","cjk_counter_preservation_gate","text_mesh_topology_candidate_gate","remote_3mf_stream_analyzer","remote_3mf_xml_iterparse","remote_3mf_transform_aware_bounds","remote_3mf_cad_drawing_v1","remote_3mf_reconstruction_sections_v2","auto_hole_slot_detection","auto_fillet_chamfer_candidates","auto_section_view_plan","multipart_dimension_semantics","supplementary_stl_step_analyzer","generic_memory_budget_v1","streaming_3mf_glb_export","auto_text_boldening","typography_layout_bounds","script_aware_glyph_spacing","glyph_clearance_gate","text_readability_gate","bambu_04_text_profile","text_slicer_no_merge_gate","separate_structural_text_min_feature","arachne_text_project_settings","bambu_cli_real_slice","gcode_3mf_toolpath_gate","print_ready_plate_3mf","plate_part_coverage_gate","universal_cad_recipe_v2","section_loft_reconstruction_v1","section_loft_open_cavity_v2","axisymmetric_revolve_reconstruction_v1","isolated_universal_jobs_v1","planar_prismatic_reconstruction_v1"],"profiles":["bambu_a1_mini_04"]})
         if path.startswith("/v1/jobs/"):
             if not self.authorized():return
             jid=path.split("/")[-1];j=JOBS.get(jid)
