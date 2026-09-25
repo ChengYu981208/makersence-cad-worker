@@ -1211,7 +1211,7 @@ args=sys.argv[sys.argv.index("--")+1:]
 spec=json.load(open(args[0],encoding="utf-8"))
 out_path,blend_path=args[1],args[2]
 width,height,body_t=map(float,(spec["width_mm"],spec["height_mm"],spec["body_thickness_mm"]))
-anchors=[(-.50,-.10),(-.48,-.32),(-.35,-.50),(-.20,-.38),(-.15,-.33),(0,-.32),(.15,-.33),(.20,-.38),(.35,-.50),(.48,-.32),(.50,-.10),(.42,0),(.50,.10),(.48,.32),(.35,.50),(.20,.38),(.15,.31),(.12,.38),(.11,.46),(0,.50),(-.11,.46),(-.12,.38),(-.15,.31),(-.20,.38),(-.35,.50),(-.48,.32),(-.50,.10),(-.42,0)]
+anchors=[(-.10,.50),(.10,.50),(.15,.43),(.14,.34),(.20,.28),(.30,.36),(.38,.46),(.48,.42),(.50,.30),(.45,.17),(.39,.10),(.45,.02),(.50,-.10),(.49,-.28),(.40,-.43),(.30,-.46),(.20,-.36),(.14,-.27),(0,-.22),(-.14,-.27),(-.20,-.36),(-.30,-.46),(-.40,-.43),(-.49,-.28),(-.50,-.10),(-.45,.02),(-.39,.10),(-.45,.17),(-.50,.30),(-.48,.42),(-.38,.46),(-.30,.36),(-.20,.28),(-.14,.34),(-.15,.43)]
 bpy.ops.object.select_all(action="SELECT")
 bpy.ops.object.delete(use_global=False)
 curve=bpy.data.curves.new("Bone_Sculptural_Contour","CURVE")
@@ -1245,7 +1245,7 @@ obj.scale=(sx,sy,1)
 obj.location=(-cx*sx,-cy*sy,body_t/2)
 normalized=[[round((x-cx)*sx,6),round((y-cy)*sy,6)] for x,y in points]
 with open(out_path,"w",encoding="utf-8") as handle:
-    json.dump({"engine":"Blender","blender_version":bpy.app.version_string,"profile":"organic_bone_v1","outline_points_mm":normalized,"dimensions_mm":[width,height,body_t]},handle)
+    json.dump({"engine":"Blender","blender_version":bpy.app.version_string,"profile":"organic_bone_v2","outline_points_mm":normalized,"dimensions_mm":[width,height,body_t]},handle)
 bpy.ops.wm.save_as_mainfile(filepath=blend_path,check_existing=False)
 '''
 def hybrid_bone_tag(c,req):
@@ -1297,10 +1297,10 @@ def hybrid_bone_tag(c,req):
     # a thin perimeter ring exceeded the 1 GB worker limit and restarted it.
     accent=None
     for side in (-1,1):
-        px=side*width*.36;py=-height*.34
-        paw=cq.Workplane("XY").center(px,py).ellipse(2.15,1.85).extrude(accent_h)
-        for dx,dy in [(-2.05,2.2),(-.68,3.0),(.68,3.0),(2.05,2.2)]:
-            paw=paw.union(cq.Workplane("XY").center(px+dx,py+dy).ellipse(.78,.98).extrude(accent_h))
+        px=side*width*.34;py=-height*.29
+        paw=cq.Workplane("XY").center(px,py).ellipse(1.80,1.55).extrude(accent_h)
+        for dx,dy in [(-1.72,1.85),(-.57,2.48),(.57,2.48),(1.72,1.85)]:
+            paw=paw.union(cq.Workplane("XY").center(px+dx,py+dy).ellipse(.65,.82).extrude(accent_h))
         accent=paw if accent is None else accent.union(paw)
     # A restrained raised border repeats the approved sculptural bone silhouette.
     # Simplifying the Blender contour before the two CAD extrusions keeps OCCT
@@ -1315,44 +1315,44 @@ def hybrid_bone_tag(c,req):
     if ring.val().isNull() or not ring.val().isValid():raise ValueError("HYBRID_BORDER_BREP_INVALID")
     accent=accent.union(ring).translate((0,0,body_t))
     print("hybrid accent complete",round(current_rss_mb(),1),flush=True)
-    face=cq.Workplane("XY").center(0,-height*.025).ellipse(width*.19,height*.205).extrude(face_h)
+    face=cq.Workplane("XY").center(0,-height*.035).ellipse(width*.16,height*.16).extrude(face_h)
     for side in (-1,1):
-        ear=cq.Workplane("XY").ellipse(width*.076,height*.17).extrude(face_h*.90).rotate((0,0,0),(0,0,1),-side*19).translate((side*width*.218,height*.025,0))
+        ear=cq.Workplane("XY").ellipse(width*.055,height*.115).extrude(face_h*.90).rotate((0,0,0),(0,0,1),-side*16).translate((side*width*.185,height*.005,0))
         face=face.union(ear)
     face=face.translate((0,0,body_t))
     muzzle_h=relief*.24
     muzzle=None
     for side in (-1,1):
-        cheek=cq.Workplane("XY").center(side*width*.054,-height*.12).ellipse(width*.082,height*.059).extrude(muzzle_h)
+        cheek=cq.Workplane("XY").center(side*width*.046,-height*.11).ellipse(width*.068,height*.052).extrude(muzzle_h)
         muzzle=cheek if muzzle is None else muzzle.union(cheek)
-    tongue=cq.Workplane("XY").center(0,-height*.185).ellipse(width*.037,height*.032).extrude(muzzle_h)
+    tongue=cq.Workplane("XY").center(0,-height*.165).ellipse(width*.030,height*.025).extrude(muzzle_h)
     muzzle=muzzle.union(tongue)
     for side in (-1,1):
-        ear_inset=cq.Workplane("XY").center(side*width*.215,height*.018).ellipse(width*.030,height*.087).extrude(muzzle_h*.62).rotate((0,0,0),(0,0,1),-side*18)
+        ear_inset=cq.Workplane("XY").center(side*width*.183,height*.002).ellipse(width*.022,height*.058).extrude(muzzle_h*.62).rotate((0,0,0),(0,0,1),-side*16)
         muzzle=muzzle.union(ear_inset)
     muzzle=muzzle.translate((0,0,body_t+face_h))
     dark=None
     for side in (-1,1):
-        eye=cq.Workplane("XY").center(side*width*.073,height*.07).ellipse(max(.8,width*.022),max(1,height*.030)).extrude(details_h*.55).translate((0,0,body_t+face_h))
+        eye=cq.Workplane("XY").center(side*width*.060,height*.045).ellipse(max(.72,width*.018),max(.82,height*.023)).extrude(details_h*.55).translate((0,0,body_t+face_h))
         dark=eye if dark is None else dark.union(eye)
-    nose=cq.Workplane("XY").polyline([(-width*.043,-height*.052),(width*.043,-height*.052),(0,-height*.115)]).close().extrude(relief-face_h-muzzle_h).translate((0,0,body_t+face_h+muzzle_h))
+    nose=cq.Workplane("XY").polyline([(-width*.034,-height*.050),(width*.034,-height*.050),(0,-height*.100)]).close().extrude(relief-face_h-muzzle_h).translate((0,0,body_t+face_h+muzzle_h))
     dark=dark.union(nose)
     for side in (-1,1):
-        brow=cq.Workplane("XY").center(side*width*.073,height*.14).ellipse(width*.035,max(.45,height*.010)).extrude(details_h*.38).rotate((0,0,0),(0,0,1),-side*13).translate((0,0,body_t+face_h))
+        brow=cq.Workplane("XY").center(side*width*.060,height*.105).ellipse(width*.028,max(.42,height*.009)).extrude(details_h*.38).rotate((0,0,0),(0,0,1),-side*13).translate((0,0,body_t+face_h))
         dark=dark.union(brow)
     for side in (-1,1):
-        mouth_path=LineString([(0,-height*.155),(side*width*.025,-height*.175),(side*width*.055,-height*.180),(side*width*.080,-height*.170)])
+        mouth_path=LineString([(0,-height*.135),(side*width*.021,-height*.153),(side*width*.045,-height*.158),(side*width*.066,-height*.150)])
         mouth_outline=mouth_path.buffer(.42,cap_style=1,join_style=1,resolution=5)
         smile=cq.Workplane("XY").polyline(list(mouth_outline.exterior.coords)[:-1]).close().extrude((relief-face_h-muzzle_h)*.55).translate((0,0,body_t+face_h+muzzle_h))
         dark=dark.union(smile)
         for dx,dy in ((.1,.5),(1.25,0),(.8,-1.0)):
-            dot=cq.Workplane("XY").center(side*(width*.067+dx),-height*.125+dy).circle(.42).extrude((relief-face_h-muzzle_h)*.50).translate((0,0,body_t+face_h+muzzle_h))
+            dot=cq.Workplane("XY").center(side*(width*.056+dx),-height*.112+dy).circle(.42).extrude((relief-face_h-muzzle_h)*.50).translate((0,0,body_t+face_h+muzzle_h))
             dark=dark.union(dot)
     print("hybrid face complete",round(current_rss_mb(),1),flush=True)
     req["_blender_profile"]={"engine":"Blender","version":profile.get("blender_version"),"profile":profile.get("profile"),"outline_points":len(points),"source_file":"source.blend"}
     return [
         {"name":"BODY","role":"main_body","physical_separate":True,"editable_separate":True,"color":color_hex(c.get("body_color") or "#efe9d9"),"shape":body,"geom":None,"min_feature_mm":.8},
-        {"name":"PET_ACCENT","role":"semantic_relief","physical_separate":False,"editable_separate":True,"border_inner_xy":list(inner.exterior.coords),"paw_bounds_xy":[[side*width*.36-3.0,-height*.34-2.3,side*width*.36+3.0,-height*.34+4.4] for side in (-1,1)],"color":color_hex(c.get("accent_color") or "#8b9687"),"shape":accent,"geom":None,"min_feature_mm":.8},
+        {"name":"PET_ACCENT","role":"semantic_relief","physical_separate":False,"editable_separate":True,"border_inner_xy":list(inner.exterior.coords),"paw_bounds_xy":[[side*width*.34-2.5,-height*.29-2.0,side*width*.34+2.5,-height*.29+3.4] for side in (-1,1)],"color":color_hex(c.get("accent_color") or "#8b9687"),"shape":accent,"geom":None,"min_feature_mm":.8},
         {"name":"DOG_FACE","role":"semantic_relief","physical_separate":False,"editable_separate":True,"color":color_hex(c.get("face_color") or "#e8ddc8"),"shape":face,"geom":None,"min_feature_mm":.8},
         {"name":"MUZZLE","role":"semantic_relief","physical_separate":False,"editable_separate":True,"color":color_hex(c.get("muzzle_color") or c.get("body_color") or "#efe9d9"),"shape":muzzle,"geom":None,"min_feature_mm":.8},
         {"name":"FACE_DETAIL","role":"semantic_relief","physical_separate":False,"editable_separate":True,"color":color_hex(c.get("detail_color") or "#4f5c50"),"shape":dark,"geom":None,"min_feature_mm":.8}
