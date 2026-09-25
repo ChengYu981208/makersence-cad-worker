@@ -7,3 +7,5 @@ shapely==2.1.2
 Pillow>=10.0
 httpx>=0.27
 pytest>=8.0
+manifold3d==3.5.3
+lib3mf==2.5.0
