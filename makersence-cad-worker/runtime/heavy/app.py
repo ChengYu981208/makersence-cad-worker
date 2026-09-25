@@ -33,6 +33,7 @@ TEXT_LATIN_GAP_DEFAULT=0.50
 TEXT_CJK_GAP_DEFAULT=0.55
 TEXT_CJK_INTERNAL_GAP_DEFAULT=0.46
 MAX_COLORS_DEFAULT=4
+SVG_PROFILE_FAMILIES={"svg_profile_extrusion","silhouette_plate","rounded_plate","keychain_plate","nfc_keychain"}
 HEAVY_JOB_SEMAPHORE=threading.Semaphore(max(1,int(os.environ.get("MAKERSENCE_HEAVY_CONCURRENCY","1"))))
 
 def current_rss_mb():
@@ -164,20 +165,6 @@ def rounded_box(w,d,h,r):
         try:s=s.edges("|Z").fillet(r)
         except Exception:pass
     return s
-
-def open_box(p):
-    w=f(p.get("width_mm"),80); d=f(p.get("depth_mm"),60); h=f(p.get("height_mm"),35); wall=f(p.get("wall_mm"),2.4); r=f(p.get("corner_radius_mm"),4)
-    outer=rounded_box(w,d,h,r)
-    inner=rounded_box(max(1,w-2*wall),max(1,d-2*wall),max(1,h-wall),max(0,r-wall)).translate((0,0,wall))
-    return outer.cut(inner)
-
-def phone_stand(p):
-    width=f(p.get("width_mm"),75); depth=f(p.get("depth_mm"),80); base=f(p.get("base_thickness_mm"),5)
-    back_h=f(p.get("back_height_mm"),90); back_t=f(p.get("back_thickness_mm"),5); lip_h=f(p.get("lip_height_mm"),12); lip_t=f(p.get("lip_thickness_mm"),5)
-    s=cq.Workplane("XY").box(width,depth,base,centered=(True,True,False))
-    back=cq.Workplane("XY").box(width,back_t,back_h,centered=(True,True,False)).translate((0,depth/2-back_t/2,base))
-    lip=cq.Workplane("XY").box(width,lip_t,lip_h,centered=(True,True,False)).translate((0,-depth/2+lip_t/2,base))
-    return s.union(back).union(lip)
 
 def primitive_recipe(recipe):
     shape=None
@@ -1044,24 +1031,27 @@ def universal_cad_recipe(c):
 
 def build_cad_family(req):
     c=req.get("cad_contract") or req.get("recipe") or {}
-    family=str(c.get("family") or "rounded_plate")
-    if family in ("hybrid_bone_tag","static_functional_utensil_vessel","sculpted_lidded_container"):
+    family=str(c.get("family") or "").strip()
+    if family in ("hybrid_bone_tag","static_functional_utensil_vessel","sculpted_lidded_container","open_box","phone_stand"):
         raise ValueError("LEGACY_SPECIALIZED_FAMILY_DISABLED_USE_UNIVERSAL_CAD_RECIPE:"+family)
     if family=="universal_cad_recipe":return universal_cad_recipe(c),[],[],[]
-    if family=="open_box":base=open_box(c)
-    elif family=="phone_stand":base=phone_stand(c)
-    elif family=="primitive_recipe":base=primitive_recipe(c)
-    else:
-        w=f(c.get("width_mm"),80);h=f(c.get("height_mm"),50);t=max(.8,f(c.get("thickness_mm"),3));r=max(0,f(c.get("corner_radius_mm"),4))
-        base=rounded_box(w,h,t,r)
-    return [{"name":"BODY","role":"body","color":"#000000","shape":base,"geom":None,"min_feature_mm":c.get("wall_mm") or c.get("thickness_mm")}],[],[],[]
+    if family=="primitive_recipe":
+        base=primitive_recipe(c)
+        return [{"name":"BODY","role":"body","color":color_hex(c.get("body_color") or "#6d7480"),"shape":base,"geom":None,"min_feature_mm":c.get("wall_mm") or c.get("thickness_mm")}],[],[],[]
+    if family in SVG_PROFILE_FAMILIES:
+        raise ValueError("SVG_PROFILE_ARTIFACT_REQUIRED:"+family)
+    if not family:
+        raise ValueError("CAD_FAMILY_REQUIRED_USE_UNIVERSAL_CAD_RECIPE")
+    raise ValueError("CAD_FAMILY_UNSUPPORTED_USE_UNIVERSAL_CAD_RECIPE:"+family)
 
 def build(req):
     c=req.get("cad_contract") or req.get("recipe") or {}
-    family=str(c.get("family") or "")
-    if req.get("svg_artifact",{}).get("parts") and family in ("silhouette_plate","rounded_plate","keychain_plate","nfc_keychain"):
+    family=str(c.get("family") or "").strip()
+    has_svg=bool((req.get("svg_artifact") or {}).get("parts"))
+    if has_svg and (family in SVG_PROFILE_FAMILIES or not family):
         return build_svg_plate(req)
     return build_cad_family(req)
+
 
 def _part_shape(part,assembled=False):
     s=part["shape"]
@@ -1433,16 +1423,12 @@ def validate_parts(req,parts,svg_geoms,hole_tools,invalid):
         actual=f(c.get("xy_clearance_mm"),target);clearance_checks=[{"name":"xy_clearance","actual_mm":actual,"required_mm":target,"ok":actual+1e-9>=target}]
     clearance_ok=all(x["ok"] for x in clearance_checks)
 
-    svg_driven=family in ("silhouette_plate","rounded_plate","keychain_plate","nfc_keychain")
+    svg_driven=bool((req.get("svg_artifact") or {}).get("parts")) and (family in SVG_PROFILE_FAMILIES or not family)
     box=(req.get("svg_artifact") or {}).get("design_box_mm") or []
     contract_svg_match=True
     if svg_driven and len(box)==2:
         contract_svg_match=abs(f(c.get("width_mm"),box[0])-f(box[0]))<=.05 and abs(f(c.get("height_mm"),box[1])-f(box[1]))<=.05
     contract_dimensions_ok=True;expected_dimensions_mm=None;contract_measured_dimensions_mm=None
-    if family in ("open_box","phone_stand"):
-        expected_dimensions_mm=[f(c.get("width_mm"),dims[0]),f(c.get("depth_mm"),dims[1]),f(c.get("height_mm"),dims[2])]
-        contract_measured_dimensions_mm=list(dims)
-        contract_dimensions_ok=all(abs(dims[i]-expected_dimensions_mm[i])<=.05 for i in range(3))
     universal_fidelity=None;design_fidelity_gate=None;design_fidelity_ok=True
     cad_dimension_constraints=list(c.get("_cad_dimension_bindings") or [])
     cad_dimension_constraints_ok=True
@@ -1489,8 +1475,8 @@ def validate_parts(req,parts,svg_geoms,hole_tools,invalid):
             through_intent_checks.append({"name":p.get("id"),"purpose":meta.get("purpose"),"declared_through":meta.get("through"),"ok":intent_ok})
     unintended_through_cut_free=all(x.get("ok") is True for x in through_intent_checks) and all((x.get("declared_through") is False and x.get("floor_mm",0)+1e-6>=x.get("required_floor_mm",min_feature)) for x in pocket_checks)
     appearance_hash_match=(req.get("appearance_lock") or {}).get("appearance_hash")==req.get("appearance_hash") and bool(req.get("appearance_hash"))
-    known_support_free=family in ("silhouette_plate","rounded_plate","keychain_plate","nfc_keychain","open_box","phone_stand")
-    support_deferred=family=="universal_cad_recipe"
+    known_support_free=svg_driven
+    support_deferred=family in ("universal_cad_recipe","primitive_recipe")
     support_required=not known_support_free
     island_free=feature_containment_ok
     mesh_ok=open_edges==0 and nonmanifold==0 and degenerate==0
@@ -3705,7 +3691,7 @@ def _u_cad_evidence_binding_selftest():
     return {"status":"PASS" if all(checks.values()) else "FAIL","checks":checks,"bindings":binding_rows,"removed_volume_mm3":round(removed,3),"expected_removed_volume_mm3":round(expected,3)}
 
 class Handler(BaseHTTPRequestHandler):
-    server_version="MakerSenceCAD/2.56.0-generic-family-cleanup"
+    server_version="MakerSenceCAD/2.57.0-fail-closed-family-router"
     def log_message(self,fmt,*args):print(fmt%args,flush=True)
     def send_json(self,code,obj):
         data=json.dumps(obj,ensure_ascii=False).encode("utf-8")
@@ -3716,7 +3702,7 @@ class Handler(BaseHTTPRequestHandler):
         return True
     def do_GET(self):
         path=urlparse(self.path).path
-        if path=="/health":return self.send_json(200,{"ok":True,"service":"makersence-cad-worker","version":"2.56.0-generic-family-cleanup","engine":"cadquery+svgpathtools+shapely+pillow","bambu_slicer":{"available":bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),"engine":"Bambu Studio","version":BAMBU_VERSION},"capabilities":["compact_step_brep","bambu_native_parts","detachable_parts","assembly_render","product_dimensions","open_edges_zero_gate","formal_mesh_render","artifact_reaudit","rectangular_blind_pockets","geometry_intent_gate","orphan_geometry_gate","unintended_through_cut_gate","welded_3mf_meshes","exported_3mf_topology_gate","true_font_outline_text","high_smooth_vector_mesh","multilingual_font_fallback","actual_text_stroke_gate","adaptive_cjk_regular_first","cjk_internal_clearance_gate","cjk_counter_preservation_gate","text_mesh_topology_candidate_gate","remote_3mf_stream_analyzer","remote_3mf_xml_iterparse","remote_3mf_transform_aware_bounds","remote_3mf_cad_drawing_v1","remote_3mf_reconstruction_sections_v2","auto_hole_slot_detection","blind_cavity_detection_v1","planar_face_cluster_locator_v1","cavity_bottom_face_match_v1","residual_wall_normal_distance_v1","paired_plane_thickness_v1","bounded_per_part_feature_scan_v1","auto_fillet_chamfer_candidates","auto_section_view_plan","multipart_dimension_semantics","supplementary_stl_step_analyzer","generic_memory_budget_v1","streaming_3mf_glb_export","source_3mf_glb_preview_v1","world_space_feature_center_v1","auto_text_boldening","typography_layout_bounds","script_aware_glyph_spacing","glyph_clearance_gate","text_readability_gate","bambu_04_text_profile","text_slicer_no_merge_gate","separate_structural_text_min_feature","arachne_text_project_settings","bambu_cli_real_slice","gcode_3mf_toolpath_gate","print_ready_plate_3mf","plate_part_coverage_gate","universal_cad_recipe_v2","cad_evidence_parametric_binding_v1","blind_cavity_recipe_cut_v1","planar_design_fidelity_artifact_gate_v1","universal_design_fidelity_artifact_gate_v1","section_loft_reconstruction_v1","section_loft_open_cavity_v2","multipart_relation_rebuild_v1","per_part_reconstruction_evidence_v1","planar_multiloop_extrusion_v1","planar_mesh_projection_fallback_v1","bambu_assembly_metadata_evidence_v1","assembly_pose_solver_v1","assembly_pose_solver_v3","mechanism_pose_brep_probe_v1","mechanism_motion_solver_v1","mechanism_motion_solver_v2","mechanism_motion_solver_v3","hinge_sweep_collision_gate_v1","terminal_stop_refinement_v1","latch_relative_pivot_engagement_v1","motion_bbox_prefilter_v1","motion_memory_checkpoint_v1","motion_exact_separation_prefilter_v1","motion_fail_closed_collision_v1","motion_early_direction_exit_v1","motion_isolated_subprocess_v1","motion_timeout_guard_v1","async_motion_jobs_v1","separate_part_mate_resolver_v1","planar_ring_opening_match_v1","faceted_mesh_brep_v1","complex_topology_mesh_fallback_v1","sealed_internal_cavity_mesh_fallback_v1","multipart_dimension_semantics_v2","source_intended_contact_qa_v1","same_root_assembly_guard_v1","axisymmetric_revolve_reconstruction_v1","bounded_inprocess_universal_jobs_v1","planar_prismatic_reconstruction_v1","commercial_visual_release_gate_v1",],"profiles":["bambu_a1_mini_04"],"universal_executor_probe":{"cavity_loft_policy":UNIVERSAL_CAVITY_LOFT_POLICY,"loft_argcount":_u_loft_from_loops.__code__.co_argcount}})
+        if path=="/health":return self.send_json(200,{"ok":True,"service":"makersence-cad-worker","version":"2.57.0-fail-closed-family-router","engine":"cadquery+svgpathtools+shapely+pillow","bambu_slicer":{"available":bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),"engine":"Bambu Studio","version":BAMBU_VERSION},"capabilities":["compact_step_brep","bambu_native_parts","detachable_parts","assembly_render","product_dimensions","open_edges_zero_gate","formal_mesh_render","artifact_reaudit","rectangular_blind_pockets","geometry_intent_gate","orphan_geometry_gate","unintended_through_cut_gate","welded_3mf_meshes","exported_3mf_topology_gate","true_font_outline_text","high_smooth_vector_mesh","multilingual_font_fallback","actual_text_stroke_gate","adaptive_cjk_regular_first","cjk_internal_clearance_gate","cjk_counter_preservation_gate","text_mesh_topology_candidate_gate","remote_3mf_stream_analyzer","remote_3mf_xml_iterparse","remote_3mf_transform_aware_bounds","remote_3mf_cad_drawing_v1","remote_3mf_reconstruction_sections_v2","auto_hole_slot_detection","blind_cavity_detection_v1","planar_face_cluster_locator_v1","cavity_bottom_face_match_v1","residual_wall_normal_distance_v1","paired_plane_thickness_v1","bounded_per_part_feature_scan_v1","auto_fillet_chamfer_candidates","auto_section_view_plan","multipart_dimension_semantics","supplementary_stl_step_analyzer","generic_memory_budget_v1","streaming_3mf_glb_export","source_3mf_glb_preview_v1","world_space_feature_center_v1","auto_text_boldening","typography_layout_bounds","script_aware_glyph_spacing","glyph_clearance_gate","text_readability_gate","bambu_04_text_profile","text_slicer_no_merge_gate","separate_structural_text_min_feature","arachne_text_project_settings","bambu_cli_real_slice","gcode_3mf_toolpath_gate","print_ready_plate_3mf","plate_part_coverage_gate","universal_cad_recipe_v2","cad_evidence_parametric_binding_v1","blind_cavity_recipe_cut_v1","planar_design_fidelity_artifact_gate_v1","universal_design_fidelity_artifact_gate_v1","section_loft_reconstruction_v1","section_loft_open_cavity_v2","multipart_relation_rebuild_v1","per_part_reconstruction_evidence_v1","planar_multiloop_extrusion_v1","planar_mesh_projection_fallback_v1","bambu_assembly_metadata_evidence_v1","assembly_pose_solver_v1","assembly_pose_solver_v3","mechanism_pose_brep_probe_v1","mechanism_motion_solver_v1","mechanism_motion_solver_v2","mechanism_motion_solver_v3","hinge_sweep_collision_gate_v1","terminal_stop_refinement_v1","latch_relative_pivot_engagement_v1","motion_bbox_prefilter_v1","motion_memory_checkpoint_v1","motion_exact_separation_prefilter_v1","motion_fail_closed_collision_v1","motion_early_direction_exit_v1","motion_isolated_subprocess_v1","motion_timeout_guard_v1","async_motion_jobs_v1","separate_part_mate_resolver_v1","planar_ring_opening_match_v1","faceted_mesh_brep_v1","complex_topology_mesh_fallback_v1","sealed_internal_cavity_mesh_fallback_v1","multipart_dimension_semantics_v2","source_intended_contact_qa_v1","same_root_assembly_guard_v1","axisymmetric_revolve_reconstruction_v1","bounded_inprocess_universal_jobs_v1","planar_prismatic_reconstruction_v1","commercial_visual_release_gate_v1","fail_closed_family_router_v1","svg_profile_extrusion_v1",],"profiles":["bambu_a1_mini_04"],"universal_executor_probe":{"cavity_loft_policy":UNIVERSAL_CAVITY_LOFT_POLICY,"loft_argcount":_u_loft_from_loops.__code__.co_argcount}})
         if path=="/v1/selftest/face-evidence":
             if not self.authorized():return
             return self.send_json(200,_dw_face_evidence_selftest())
@@ -3797,5 +3783,5 @@ if __name__=="__main__":
         raise SystemExit(_generate_child_cli(sys.argv[2],sys.argv[3]))
     if len(sys.argv)>=4 and sys.argv[1]=="--motion-child":
         raise SystemExit(_motion_child_cli(sys.argv[2],sys.argv[3]))
-    print("MakerSence CAD Worker 2.56.0-generic-family-cleanup starting on",PORT,"Bambu Studio",BAMBU_VERSION,"available",bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),flush=True)
+    print("MakerSence CAD Worker 2.57.0-fail-closed-family-router starting on",PORT,"Bambu Studio",BAMBU_VERSION,"available",bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),flush=True)
     ThreadingHTTPServer(("0.0.0.0",PORT),Handler).serve_forever()
