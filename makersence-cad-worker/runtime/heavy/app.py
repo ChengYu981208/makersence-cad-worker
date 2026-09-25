@@ -1349,6 +1349,27 @@ def hybrid_bone_tag(c,req):
             dot=cq.Workplane("XY").center(side*(width*.056+dx),-height*.112+dy).circle(.42).extrude((relief-face_h-muzzle_h)*.50).translate((0,0,body_t+face_h+muzzle_h))
             dark=dark.union(dot)
     print("hybrid face complete",round(current_rss_mb(),1),flush=True)
+    outline_poly=Polygon(points).buffer(0)
+    if outline_poly.geom_type!="Polygon" or outline_poly.is_empty or not outline_poly.is_valid:raise ValueError("HYBRID_SILHOUETTE_INVALID")
+    area_ratio=float(outline_poly.area)/max(1e-9,width*height)
+    hole_margin=max(0.0,float(outline_poly.boundary.distance(Point(0,hole_y)))-hole_d/2)
+    center_span=float(outline_poly.intersection(LineString([(0,-height),(0,height)])).length)
+    end_span=(float(outline_poly.intersection(LineString([(-width*.38,-height),(-width*.38,height)])).length)+float(outline_poly.intersection(LineString([(width*.38,-height),(width*.38,height)])).length))/2.0
+    visual_boxes=[face.val().BoundingBox(),muzzle.val().BoundingBox(),dark.val().BoundingBox()]
+    fxmin=min(b.xmin for b in visual_boxes);fxmax=max(b.xmax for b in visual_boxes);fymin=min(b.ymin for b in visual_boxes);fymax=max(b.ymax for b in visual_boxes)
+    face_width_ratio=(fxmax-fxmin)/max(1e-9,width);face_height_ratio=(fymax-fymin)/max(1e-9,height)
+    req["_hybrid_visual_metrics"]={
+      "profile":"commercial_bone_v2",
+      "silhouette_area_ratio":round(area_ratio,4),
+      "center_vertical_span_mm":round(center_span,3),
+      "end_vertical_span_mm":round(end_span,3),
+      "keyring_edge_margin_mm":round(hole_margin,3),
+      "face_width_ratio":round(face_width_ratio,4),
+      "face_height_ratio":round(face_height_ratio,4),
+      "silhouette_profile_ok":bool(.50<=area_ratio<=.82 and end_span>=center_span*1.05),
+      "detail_scale_ok":bool(face_width_ratio<=.50 and face_height_ratio<=.42),
+      "negative_space_ok":bool(hole_margin>=2.0 and (hole_y-hole_d/2-fymax)>=2.2)
+    }
     req["_blender_profile"]={"engine":"Blender","version":profile.get("blender_version"),"profile":profile.get("profile"),"outline_points":len(points),"source_file":"source.blend"}
     return [
         {"name":"BODY","role":"main_body","physical_separate":True,"editable_separate":True,"color":color_hex(c.get("body_color") or "#efe9d9"),"shape":body,"geom":None,"min_feature_mm":.8},
@@ -2226,6 +2247,37 @@ def render_product_png(req,parts,svg_geoms,path,validation):
       "note":"Mock content is presentation-only; product geometry is rendered from the same formal parts exported to 3MF."
     }
 
+def commercial_visual_gate(req,parts,validation):
+    render=validation.get("product_render") or {}
+    cad=req.get("cad_contract") or {}
+    family=str(cad.get("family") or "")
+    coverage=f(render.get("projected_coverage"),0)
+    checks={
+      "render_completed":render.get("status")=="PASS",
+      "camera_composition":render.get("camera_ok") is True and render.get("off_canvas") is False,
+      "product_frame_coverage":coverage>=.12 and coverage<=.68,
+      "smooth_surface_language":validation.get("smooth_vector_ok") is True,
+      "semantic_geometry_explained":validation.get("part_intent_ok") is True and validation.get("orphan_geometry_free") is True
+    }
+    metrics={"projected_coverage":round(coverage,4),"family":family,"part_count":len(parts)}
+    if family=="hybrid_bone_tag":
+        vm=req.get("_hybrid_visual_metrics") or {}
+        checks.update({
+          "recognizable_silhouette":vm.get("silhouette_profile_ok") is True,
+          "integrated_keyring_hole":f(vm.get("keyring_edge_margin_mm"),0)>=2.0,
+          "balanced_detail_scale":vm.get("detail_scale_ok") is True,
+          "negative_space_preserved":vm.get("negative_space_ok") is True
+        })
+        metrics.update(vm)
+    ok=all(v is True for v in checks.values())
+    return {
+      "status":"PASS" if ok else "FAIL",
+      "checks":checks,
+      "metrics":metrics,
+      "policy":"Printable geometry is not sufficient: commercial output must also preserve recognizable silhouette, visual hierarchy, negative space and integrated functional features.",
+      "action":"ACCEPT" if ok else "REDESIGN_VISUAL_LANGUAGE"
+    }
+
 def audit_print_plate_3mf(path,expected_names,build_volume):
     out={"ok":False,"name":path.name,"zip_ok":False,"object_count":0,"build_item_count":0,"component_count":0,
          "open_edges":0,"nonmanifold_edges":0,"degenerate_triangles":0,"object_names":[],"dimensions_mm":[0,0,0],"within_build_volume":False}
@@ -2346,12 +2398,18 @@ def export_all(req,parts,svg_geoms,folder,validation):
     artifacts.extend(plate_export.get("artifacts") or [])
     try:
         validation["product_render"]=render_product_png(req,parts,svg_geoms,png,validation)
+        validation["commercial_visual_gate"]=commercial_visual_gate(req,parts,validation)
+        validation["commercial_visual_ok"]=validation["commercial_visual_gate"].get("status")=="PASS"
         if png.exists() and png.stat().st_size>1024:
             artifacts.append({"type":"png","name":"product_render_main.png","url":"/v1/artifacts/"+folder.name+"/product_render_main.png"})
         else:
             validation["product_render"]={"status":"FAIL","error":"render output missing or empty"}
+            validation["commercial_visual_gate"]=commercial_visual_gate(req,parts,validation)
+            validation["commercial_visual_ok"]=False
     except Exception as ex:
         validation["product_render"]={"status":"FAIL","error":str(ex)}
+        validation["commercial_visual_gate"]=commercial_visual_gate(req,parts,validation)
+        validation["commercial_visual_ok"]=False
     return artifacts
 
 def audit_exports(folder,expected_parts,expected_dims):
@@ -2475,6 +2533,7 @@ def _run_generate_job_inner(jid,req,folder):
         validation["exported_3mf_degenerate_triangles"]=int(mf_top.get("degenerate_triangles") or 0)
         required=["brep_valid","watertight","hole_penetration","unintended_through_cut_free","part_intent_ok","orphan_geometry_free","smooth_vector_ok","typography_ok","text_min_stroke_ok","glyph_clearance_ok","text_internal_clearance_ok","text_slicer_no_merge_ok","text_layout_bounds_ok","text_readability_ok","min_feature_ok","structural_min_ok","feature_containment_ok","clearance_ok","assembly_parts_ok","first_layer_contact_ok","island_free","support_profile_ok","a1_mini_fit","ams_colors_ok","nozzle_profile_ok","contract_svg_match","contract_dimensions_ok","appearance_hash_match","preview_matches_export","bambu_mesh_topology_ok"]
         if (req.get("cad_contract") or {}).get("plate_plan"):required.append("print_plate_plan_ok")
+        required.append("commercial_visual_ok")
         if family=="hybrid_bone_tag":required.extend(["blender_hybrid_ok","hybrid_signature_ok"])
         if family=="universal_cad_recipe":
             required.append("cad_dimension_constraints_ok")
@@ -4083,7 +4142,7 @@ def _u_cad_evidence_binding_selftest():
     return {"status":"PASS" if all(checks.values()) else "FAIL","checks":checks,"bindings":binding_rows,"removed_volume_mm3":round(removed,3),"expected_removed_volume_mm3":round(expected,3)}
 
 class Handler(BaseHTTPRequestHandler):
-    server_version="MakerSenceCAD/2.25.0-blender-hybrid"
+    server_version="MakerSenceCAD/2.26.0-commercial-visual-gate"
     def log_message(self,fmt,*args):print(fmt%args,flush=True)
     def send_json(self,code,obj):
         data=json.dumps(obj,ensure_ascii=False).encode("utf-8")
@@ -4094,7 +4153,7 @@ class Handler(BaseHTTPRequestHandler):
         return True
     def do_GET(self):
         path=urlparse(self.path).path
-        if path=="/health":return self.send_json(200,{"ok":True,"service":"makersence-cad-worker","version":"2.51.0-motion-exact-prefilter","engine":"cadquery+blender+svgpathtools+shapely+pillow","blender":{"available":pathlib.Path(BLENDER_BIN).exists(),"binary":BLENDER_BIN},"bambu_slicer":{"available":bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),"engine":"Bambu Studio","version":BAMBU_VERSION},"capabilities":["compact_step_brep","bambu_native_parts","detachable_parts","assembly_render","product_dimensions","open_edges_zero_gate","formal_mesh_render","artifact_reaudit","rectangular_blind_pockets","geometry_intent_gate","orphan_geometry_gate","unintended_through_cut_gate","welded_3mf_meshes","exported_3mf_topology_gate","true_font_outline_text","high_smooth_vector_mesh","multilingual_font_fallback","actual_text_stroke_gate","adaptive_cjk_regular_first","cjk_internal_clearance_gate","cjk_counter_preservation_gate","text_mesh_topology_candidate_gate","remote_3mf_stream_analyzer","remote_3mf_xml_iterparse","remote_3mf_transform_aware_bounds","remote_3mf_cad_drawing_v1","remote_3mf_reconstruction_sections_v2","auto_hole_slot_detection","blind_cavity_detection_v1","planar_face_cluster_locator_v1","cavity_bottom_face_match_v1","residual_wall_normal_distance_v1","paired_plane_thickness_v1","bounded_per_part_feature_scan_v1","auto_fillet_chamfer_candidates","auto_section_view_plan","multipart_dimension_semantics","supplementary_stl_step_analyzer","sculpted_lidded_container_v1","smooth_pumpkin_container_v2","generic_memory_budget_v1","streaming_3mf_glb_export","source_3mf_glb_preview_v1","world_space_feature_center_v1","auto_text_boldening","typography_layout_bounds","script_aware_glyph_spacing","glyph_clearance_gate","text_readability_gate","bambu_04_text_profile","text_slicer_no_merge_gate","separate_structural_text_min_feature","arachne_text_project_settings","bambu_cli_real_slice","gcode_3mf_toolpath_gate","print_ready_plate_3mf","plate_part_coverage_gate","universal_cad_recipe_v2","cad_evidence_parametric_binding_v1","blind_cavity_recipe_cut_v1","planar_design_fidelity_artifact_gate_v1","universal_design_fidelity_artifact_gate_v1","section_loft_reconstruction_v1","section_loft_open_cavity_v2","multipart_relation_rebuild_v1","per_part_reconstruction_evidence_v1","planar_multiloop_extrusion_v1","planar_mesh_projection_fallback_v1","bambu_assembly_metadata_evidence_v1","assembly_pose_solver_v1","assembly_pose_solver_v3","mechanism_pose_brep_probe_v1","mechanism_motion_solver_v1","mechanism_motion_solver_v2","mechanism_motion_solver_v3","hinge_sweep_collision_gate_v1","terminal_stop_refinement_v1","latch_relative_pivot_engagement_v1","motion_bbox_prefilter_v1","motion_memory_checkpoint_v1","motion_exact_separation_prefilter_v1","motion_fail_closed_collision_v1","motion_early_direction_exit_v1","motion_isolated_subprocess_v1","motion_timeout_guard_v1","async_motion_jobs_v1","separate_part_mate_resolver_v1","planar_ring_opening_match_v1","faceted_mesh_brep_v1","complex_topology_mesh_fallback_v1","sealed_internal_cavity_mesh_fallback_v1","multipart_dimension_semantics_v2","source_intended_contact_qa_v1","same_root_assembly_guard_v1","axisymmetric_revolve_reconstruction_v1","bounded_inprocess_universal_jobs_v1","STATIC_FUNCTIONAL_CAD","static_functional_utensil_vessel_v1","planar_prismatic_reconstruction_v1","hybrid_bone_tag_v1","hybrid_bone_tag_v2","hybrid_bone_tag_v3","blender_profile_executor_v1"],"profiles":["bambu_a1_mini_04"],"universal_executor_probe":{"cavity_loft_policy":UNIVERSAL_CAVITY_LOFT_POLICY,"loft_argcount":_u_loft_from_loops.__code__.co_argcount}})
+        if path=="/health":return self.send_json(200,{"ok":True,"service":"makersence-cad-worker","version":"2.52.0-commercial-visual-gate","engine":"cadquery+blender+svgpathtools+shapely+pillow","blender":{"available":pathlib.Path(BLENDER_BIN).exists(),"binary":BLENDER_BIN},"bambu_slicer":{"available":bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),"engine":"Bambu Studio","version":BAMBU_VERSION},"capabilities":["compact_step_brep","bambu_native_parts","detachable_parts","assembly_render","product_dimensions","open_edges_zero_gate","formal_mesh_render","artifact_reaudit","rectangular_blind_pockets","geometry_intent_gate","orphan_geometry_gate","unintended_through_cut_gate","welded_3mf_meshes","exported_3mf_topology_gate","true_font_outline_text","high_smooth_vector_mesh","multilingual_font_fallback","actual_text_stroke_gate","adaptive_cjk_regular_first","cjk_internal_clearance_gate","cjk_counter_preservation_gate","text_mesh_topology_candidate_gate","remote_3mf_stream_analyzer","remote_3mf_xml_iterparse","remote_3mf_transform_aware_bounds","remote_3mf_cad_drawing_v1","remote_3mf_reconstruction_sections_v2","auto_hole_slot_detection","blind_cavity_detection_v1","planar_face_cluster_locator_v1","cavity_bottom_face_match_v1","residual_wall_normal_distance_v1","paired_plane_thickness_v1","bounded_per_part_feature_scan_v1","auto_fillet_chamfer_candidates","auto_section_view_plan","multipart_dimension_semantics","supplementary_stl_step_analyzer","sculpted_lidded_container_v1","smooth_pumpkin_container_v2","generic_memory_budget_v1","streaming_3mf_glb_export","source_3mf_glb_preview_v1","world_space_feature_center_v1","auto_text_boldening","typography_layout_bounds","script_aware_glyph_spacing","glyph_clearance_gate","text_readability_gate","bambu_04_text_profile","text_slicer_no_merge_gate","separate_structural_text_min_feature","arachne_text_project_settings","bambu_cli_real_slice","gcode_3mf_toolpath_gate","print_ready_plate_3mf","plate_part_coverage_gate","universal_cad_recipe_v2","cad_evidence_parametric_binding_v1","blind_cavity_recipe_cut_v1","planar_design_fidelity_artifact_gate_v1","universal_design_fidelity_artifact_gate_v1","section_loft_reconstruction_v1","section_loft_open_cavity_v2","multipart_relation_rebuild_v1","per_part_reconstruction_evidence_v1","planar_multiloop_extrusion_v1","planar_mesh_projection_fallback_v1","bambu_assembly_metadata_evidence_v1","assembly_pose_solver_v1","assembly_pose_solver_v3","mechanism_pose_brep_probe_v1","mechanism_motion_solver_v1","mechanism_motion_solver_v2","mechanism_motion_solver_v3","hinge_sweep_collision_gate_v1","terminal_stop_refinement_v1","latch_relative_pivot_engagement_v1","motion_bbox_prefilter_v1","motion_memory_checkpoint_v1","motion_exact_separation_prefilter_v1","motion_fail_closed_collision_v1","motion_early_direction_exit_v1","motion_isolated_subprocess_v1","motion_timeout_guard_v1","async_motion_jobs_v1","separate_part_mate_resolver_v1","planar_ring_opening_match_v1","faceted_mesh_brep_v1","complex_topology_mesh_fallback_v1","sealed_internal_cavity_mesh_fallback_v1","multipart_dimension_semantics_v2","source_intended_contact_qa_v1","same_root_assembly_guard_v1","axisymmetric_revolve_reconstruction_v1","bounded_inprocess_universal_jobs_v1","STATIC_FUNCTIONAL_CAD","static_functional_utensil_vessel_v1","planar_prismatic_reconstruction_v1","hybrid_bone_tag_v1","hybrid_bone_tag_v2","hybrid_bone_tag_v3","blender_profile_executor_v1"],"profiles":["bambu_a1_mini_04"],"universal_executor_probe":{"cavity_loft_policy":UNIVERSAL_CAVITY_LOFT_POLICY,"loft_argcount":_u_loft_from_loops.__code__.co_argcount}})
         if path=="/v1/selftest/face-evidence":
             if not self.authorized():return
             return self.send_json(200,_dw_face_evidence_selftest())
