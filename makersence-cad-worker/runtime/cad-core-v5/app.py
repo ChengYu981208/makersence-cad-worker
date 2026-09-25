@@ -1597,9 +1597,9 @@ def _quad_point(q,u,v):
     b=(q[3][0]*(1-u)+q[2][0]*u,q[3][1]*(1-u)+q[2][1]*u)
     return (a[0]*(1-v)+b[0]*v,a[1]*(1-v)+b[1]*v)
 
-def render_product_png(req,parts,svg_geoms,path,validation):
+def render_product_png(req,parts,svg_geoms,path,validation,camera_view="perspective",meshes=None):
     render_tol=resource_policy(req)["render_mesh_tolerance_mm"]
-    meshes=tessellated_parts(parts,render_tol,assembled=True)
+    if meshes is None:meshes=tessellated_parts(parts,render_tol,assembled=True)
     allv=[v for m in meshes for v in m["vertices"]]
     if not allv:raise ValueError("render: no mesh vertices")
     final_w,final_h=1400,1050;ss=2;W,H=final_w*ss,final_h*ss
@@ -1609,8 +1609,13 @@ def render_product_png(req,parts,svg_geoms,path,validation):
     img=Image.new("RGB",(W,H),top);d=ImageDraw.Draw(img)
     for y in range(H):
         t=y/max(1,H-1);d.line([(0,y),(W,y)],fill=_mix(top,bot,t))
-    # Camera = front/top-right; exact geometry is the source, scene dressing is not manufacturing geometry.
-    view=_vnorm((0.62,-0.70,0.78));right=_vnorm(_vcross((0,0,1),view));up=_vnorm(_vcross(view,right))
+    # Fixed camera contract over the same formal assembled meshes used for export.
+    camera_key=str(camera_view or "perspective").strip().lower()
+    camera_vectors={"front":(0.0,0.0,1.0),"back":(0.0,0.0,-1.0),"side":(1.0,0.0,0.0),"perspective":(0.62,-0.70,0.78)}
+    if camera_key not in camera_vectors:raise ValueError("unsupported camera view: "+camera_key)
+    view=_vnorm(camera_vectors[camera_key])
+    up_hint=(0.0,1.0,0.0) if abs(_vdot(view,(0.0,0.0,1.0)))>.92 else (0.0,0.0,1.0)
+    right=_vnorm(_vcross(up_hint,view));up=_vnorm(_vcross(view,right))
     mn=[min(v[i] for v in allv) for i in range(3)];mx=[max(v[i] for v in allv) for i in range(3)]
     center=tuple((mn[i]+mx[i])/2 for i in range(3))
     def rawproj(p):
@@ -1623,7 +1628,8 @@ def render_product_png(req,parts,svg_geoms,path,validation):
     scr=[proj(v) for v in allv];sx=[p[0] for p in scr];sy=[p[1] for p in scr]
     bbox_w=max(sx)-min(sx);bbox_h=max(sy)-min(sy);coverage=(bbox_w*bbox_h)/max(1,W*H)
     off_canvas=min(sx)<0 or max(sx)>W or min(sy)<0 or max(sy)>H
-    camera_ok=(not off_canvas) and coverage>=.08 and coverage<=.72
+    min_coverage=.01 if camera_key=="side" else .08
+    camera_ok=(not off_canvas) and coverage>=min_coverage and coverage<=.72
     # Soft floor shadow.
     shadow=Image.new("RGBA",(W,H),(0,0,0,0));sd=ImageDraw.Draw(shadow)
     bx=(min(sx)+max(sx))/2;by=max(sy)+H*.035;bw=(max(sx)-min(sx))*.78;bh=max(H*.035,(max(sy)-min(sy))*.10)
@@ -1652,7 +1658,7 @@ def render_product_png(req,parts,svg_geoms,path,validation):
     draw_mesh_set(body or meshes)
     # Product-context insert: a sample photo is rendered only when the Product Intent calls for it.
     # It is presentation content, not an extra printable solid.
-    if warm:
+    if warm and camera_key in ("front","perspective"):
         photo=None;photo_part=None
         for p,g in svg_geoms:
             if str(p.get("id") or "").upper() in ("PHOTO_WINDOW","PHOTO_RECESS"):
@@ -1688,8 +1694,9 @@ def render_product_png(req,parts,svg_geoms,path,validation):
     return {
       "status":"PASS" if camera_ok else "FAIL","mode":"deterministic_product_context",
       "geometry_source":"formal_3mf_parts_assembled" if assembled else "formal_cad_mesh",
-      "intent_archetype":intent.get("archetype"),"mock_content":["photo_insert"] if warm else [],
-      "camera_ok":camera_ok,"off_canvas":off_canvas,"projected_coverage":round(coverage,4),
+      "view":camera_key,"camera_vector":[round(f(x),5) for x in view],
+      "intent_archetype":intent.get("archetype"),"mock_content":["photo_insert"] if warm and camera_key in ("front","perspective") else [],
+      "camera_ok":camera_ok,"off_canvas":off_canvas,"projected_coverage":round(coverage,4),"minimum_coverage":min_coverage,
       "note":"Mock content is presentation-only; product geometry is rendered from the same formal parts exported to 3MF."
     }
 
@@ -1800,6 +1807,7 @@ def export_all(req,parts,svg_geoms,folder,validation):
     release_process_memory(parts);memory_guard(req,"export_step_done",hard=True)
     mesh_tol=effective_mesh_tolerance(req.get("cad_contract") or {})
     write_3mf(parts,mf,mesh_tol,assembled=assembled_export)
+    geometry_3mf_sha256=hashlib.sha256(mf.read_bytes()).hexdigest()
     release_process_memory(parts);memory_guard(req,"export_3mf_done",hard=True)
     plate_export=export_print_plate_3mfs(req,parts,folder,mesh_tol)
     validation["print_plate_plan"]=plate_export
@@ -1811,14 +1819,49 @@ def export_all(req,parts,svg_geoms,folder,validation):
     release_process_memory(parts);memory_guard(req,"export_glb_done",hard=True)
     artifacts=[{"type":"stl","name":"model.stl","url":"/v1/artifacts/"+folder.name+"/model.stl"},{"type":"step","name":"model.step","url":"/v1/artifacts/"+folder.name+"/model.step"},{"type":"3mf","name":"model.3mf","url":"/v1/artifacts/"+folder.name+"/model.3mf"},{"type":"glb","name":"preview.glb","url":"/v1/artifacts/"+folder.name+"/preview.glb"}]
     artifacts.extend(plate_export.get("artifacts") or [])
+    render_views={};render_meshes=None
+    render_files={
+      "front":folder/"product_render_front.png",
+      "back":folder/"product_render_back.png",
+      "side":folder/"product_render_side.png",
+      "perspective":folder/"product_render_perspective.png"
+    }
     try:
-        validation["product_render"]=render_product_png(req,parts,svg_geoms,png,validation)
-        if png.exists() and png.stat().st_size>1024:
-            artifacts.append({"type":"png","name":"product_render_main.png","url":"/v1/artifacts/"+folder.name+"/product_render_main.png"})
-        else:
-            validation["product_render"]={"status":"FAIL","error":"render output missing or empty"}
+        render_tol=resource_policy(req)["render_mesh_tolerance_mm"]
+        render_meshes=tessellated_parts(parts,render_tol,assembled=True)
+        for view_name,view_path in render_files.items():
+            try:
+                report=render_product_png(req,parts,svg_geoms,view_path,validation,camera_view=view_name,meshes=render_meshes)
+                report["appearance_hash"]=req.get("appearance_hash")
+                report["geometry_3mf_sha256"]=geometry_3mf_sha256
+                render_views[view_name]=report
+                if view_path.exists() and view_path.stat().st_size>1024:
+                    artifacts.append({"type":"png","name":view_path.name,"url":"/v1/artifacts/"+folder.name+"/"+view_path.name,
+                                      "view":view_name,"appearance_hash":req.get("appearance_hash"),"geometry_3mf_sha256":geometry_3mf_sha256})
+                else:
+                    render_views[view_name]={"status":"FAIL","view":view_name,"error":"render output missing or empty","appearance_hash":req.get("appearance_hash"),"geometry_3mf_sha256":geometry_3mf_sha256}
+            except Exception as view_ex:
+                render_views[view_name]={"status":"FAIL","view":view_name,"error":str(view_ex),"appearance_hash":req.get("appearance_hash"),"geometry_3mf_sha256":geometry_3mf_sha256}
+        perspective=render_files["perspective"]
+        if perspective.exists() and perspective.stat().st_size>1024:
+            png.write_bytes(perspective.read_bytes())
+            artifacts.append({"type":"png","name":"product_render_main.png","url":"/v1/artifacts/"+folder.name+"/product_render_main.png",
+                              "view":"perspective_alias","appearance_hash":req.get("appearance_hash"),"geometry_3mf_sha256":geometry_3mf_sha256})
+        validation["product_render_views"]={
+          "status":"PASS" if all((render_views.get(v) or {}).get("status")=="PASS" for v in ("front","back","side","perspective")) else "FAIL",
+          "required_views":["front","back","side","perspective"],
+          "geometry_3mf_sha256":geometry_3mf_sha256,
+          "appearance_hash":req.get("appearance_hash"),
+          "views":render_views
+        }
+        validation["product_render_views_ok"]=validation["product_render_views"]["status"]=="PASS"
+        validation["product_render"]=render_views.get("perspective") or {"status":"FAIL","error":"perspective render unavailable"}
     except Exception as ex:
+        validation["product_render_views"]={"status":"FAIL","error":str(ex),"required_views":["front","back","side","perspective"],"geometry_3mf_sha256":geometry_3mf_sha256,"appearance_hash":req.get("appearance_hash"),"views":render_views}
+        validation["product_render_views_ok"]=False
         validation["product_render"]={"status":"FAIL","error":str(ex)}
+    finally:
+        if render_meshes is not None:del render_meshes
     return artifacts
 
 def audit_exports(folder,expected_parts,expected_dims):
@@ -2515,7 +2558,7 @@ class Handler(BaseHTTPRequestHandler):
         return True
     def do_GET(self):
         path=urlparse(self.path).path
-        if path=="/health":return self.send_json(200,{"ok":True,"service":"makersence-cad-worker","version":"2.10.5-universal-static","engine":"cadquery+svgpathtools+shapely+pillow","bambu_slicer":{"available":bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),"engine":"Bambu Studio","version":BAMBU_VERSION},"capabilities":["compact_step_brep","bambu_native_parts","detachable_parts","assembly_render","product_dimensions","open_edges_zero_gate","formal_mesh_render","artifact_reaudit","rectangular_blind_pockets","geometry_intent_gate","orphan_geometry_gate","unintended_through_cut_gate","welded_3mf_meshes","exported_3mf_topology_gate","true_font_outline_text","high_smooth_vector_mesh","multilingual_font_fallback","actual_text_stroke_gate","adaptive_cjk_regular_first","cjk_internal_clearance_gate","cjk_counter_preservation_gate","text_mesh_topology_candidate_gate","remote_3mf_stream_analyzer","remote_3mf_xml_iterparse","remote_3mf_transform_aware_bounds","remote_3mf_cad_drawing_v1","remote_3mf_reconstruction_sections_v2","auto_hole_slot_detection","auto_fillet_chamfer_candidates","auto_section_view_plan","multipart_dimension_semantics","supplementary_stl_step_analyzer","sculpted_lidded_container_v1","smooth_pumpkin_container_v2","generic_memory_budget_v1","streaming_3mf_glb_export","auto_text_boldening","typography_layout_bounds","script_aware_glyph_spacing","glyph_clearance_gate","text_readability_gate","bambu_04_text_profile","text_slicer_no_merge_gate","separate_structural_text_min_feature","arachne_text_project_settings","bambu_cli_real_slice","gcode_3mf_toolpath_gate","print_ready_plate_3mf","plate_part_coverage_gate","universal_cad_recipe_v2","section_loft_reconstruction_v1","section_loft_open_cavity_v2","axisymmetric_revolve_reconstruction_v1","isolated_universal_jobs_v1","STATIC_FUNCTIONAL_CAD","static_functional_utensil_vessel_v1","planar_prismatic_reconstruction_v1"],"profiles":["bambu_a1_mini_04"]})
+        if path=="/health":return self.send_json(200,{"ok":True,"service":"makersence-cad-worker","version":"2.10.6-multiview-render","engine":"cadquery+svgpathtools+shapely+pillow","bambu_slicer":{"available":bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),"engine":"Bambu Studio","version":BAMBU_VERSION},"capabilities":["compact_step_brep","bambu_native_parts","detachable_parts","assembly_render","product_dimensions","open_edges_zero_gate","formal_mesh_render","multi_view_real_geometry_render_v1","artifact_reaudit","rectangular_blind_pockets","geometry_intent_gate","orphan_geometry_gate","unintended_through_cut_gate","welded_3mf_meshes","exported_3mf_topology_gate","true_font_outline_text","high_smooth_vector_mesh","multilingual_font_fallback","actual_text_stroke_gate","adaptive_cjk_regular_first","cjk_internal_clearance_gate","cjk_counter_preservation_gate","text_mesh_topology_candidate_gate","remote_3mf_stream_analyzer","remote_3mf_xml_iterparse","remote_3mf_transform_aware_bounds","remote_3mf_cad_drawing_v1","remote_3mf_reconstruction_sections_v2","auto_hole_slot_detection","auto_fillet_chamfer_candidates","auto_section_view_plan","multipart_dimension_semantics","supplementary_stl_step_analyzer","sculpted_lidded_container_v1","smooth_pumpkin_container_v2","generic_memory_budget_v1","streaming_3mf_glb_export","auto_text_boldening","typography_layout_bounds","script_aware_glyph_spacing","glyph_clearance_gate","text_readability_gate","bambu_04_text_profile","text_slicer_no_merge_gate","separate_structural_text_min_feature","arachne_text_project_settings","bambu_cli_real_slice","gcode_3mf_toolpath_gate","print_ready_plate_3mf","plate_part_coverage_gate","universal_cad_recipe_v2","section_loft_reconstruction_v1","section_loft_open_cavity_v2","axisymmetric_revolve_reconstruction_v1","isolated_universal_jobs_v1","STATIC_FUNCTIONAL_CAD","static_functional_utensil_vessel_v1","planar_prismatic_reconstruction_v1"],"profiles":["bambu_a1_mini_04"]})
         if path.startswith("/v1/jobs/"):
             if not self.authorized():return
             jid=path.split("/")[-1];j=JOBS.get(jid)
@@ -2537,12 +2580,12 @@ class Handler(BaseHTTPRequestHandler):
             if not self.authorized():return
             parts=path.strip("/").split("/")
             if len(parts)!=4:return self.send_json(404,{"error":"not found"})
-            _,_,jid,name=parts;allowed={"model.stl","model.step","model.3mf","preview.glb","product_render_main.png","manifest.json"}
+            _,_,jid,name=parts;allowed={"model.stl","model.step","model.3mf","preview.glb","product_render_main.png","product_render_front.png","product_render_back.png","product_render_side.png","product_render_perspective.png","manifest.json"}
             plate_file=bool(re.fullmatch(r"print_plate_\d+\.3mf",name))
             if name not in allowed and not plate_file:return self.send_json(404,{"error":"not found"})
             p=ROOT/jid/name
             if not p.exists():return self.send_json(404,{"error":"not found"})
-            typ="model/3mf" if plate_file else {"model.stl":"model/stl","model.step":"application/step","model.3mf":"model/3mf","preview.glb":"model/gltf-binary","product_render_main.png":"image/png","manifest.json":"application/json"}.get(name,"application/octet-stream")
+            typ="model/3mf" if plate_file else {"model.stl":"model/stl","model.step":"application/step","model.3mf":"model/3mf","preview.glb":"model/gltf-binary","product_render_main.png":"image/png","product_render_front.png":"image/png","product_render_back.png":"image/png","product_render_side.png":"image/png","product_render_perspective.png":"image/png","manifest.json":"application/json"}.get(name,"application/octet-stream")
             data=p.read_bytes();self.send_response(200);self.send_header("Content-Type",typ);self.send_header("Content-Length",str(len(data)));self.send_header("Content-Disposition",'attachment; filename="'+name+'"');self.end_headers();self.wfile.write(data);return
         self.send_json(404,{"error":"not found"})
     def do_POST(self):
