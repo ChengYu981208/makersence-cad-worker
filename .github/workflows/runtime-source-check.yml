@@ -30,8 +30,8 @@ jobs:
         run: bash -n runtime/slicer/start.sh
       - name: Runtime version markers
         run: |
-          grep -F "2.57.0-fail-closed-family-router" runtime/heavy/app.py
-          grep -F "2.11.0-fail-closed-family-router" runtime/cad-core-v5/app.py
+          grep -F "2.58.0-generic-geometry-render" runtime/heavy/app.py
+          grep -F "2.12.0-generic-geometry-render" runtime/cad-core-v5/app.py
           grep -F "1.1.11" runtime/slicer/app.py
           grep -F "3.1.0-manifold-lib3mf" app/main.py
       - name: No source-chunk dependency in packaged runtimes
