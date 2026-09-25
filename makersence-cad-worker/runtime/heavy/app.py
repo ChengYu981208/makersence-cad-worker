@@ -1551,7 +1551,7 @@ def validate_parts(req,parts,svg_geoms,hole_tools,invalid):
         expected_dimensions_mm=[f(c.get("width_mm"),dims[0]),f(c.get("depth_mm"),dims[1]),f(c.get("height_mm"),dims[2])]
         contract_measured_dimensions_mm=list(dims)
         contract_dimensions_ok=all(abs(dims[i]-expected_dimensions_mm[i])<=.05 for i in range(3))
-    elif family=="sculpted_lidded_container":    elif family=="sculpted_lidded_container":
+    elif family=="sculpted_lidded_container":
         expected_dimensions_mm=[f(product_dims[i],assembled_dims[i]) for i in range(3)]
         # OCCT BREP BoundingBox can be inflated by curve tolerances on periodic
         # organic splines. The manufactured contour is the tessellated/exported
@@ -2316,12 +2316,10 @@ def generate(req):
     jid=str(uuid.uuid4());folder=ROOT/jid;folder.mkdir(parents=True,exist_ok=True)
     JOBS[jid]={"status":"processing","stage":"queued","idempotency_key":key,"artifacts":[],"created_at":time.time(),"updated_at":time.time(),"appearance_hash":req.get("appearance_hash")}
     family=str((req.get("cad_contract") or {}).get("family") or "")
-    isolated=family=="static_functional_utensil_vessel"
     bounded=family=="universal_cad_recipe"
-    target=_run_generate_job_isolated if isolated else _run_generate_job
-    execution_mode="isolated_subprocess" if isolated else ("bounded_inprocess" if bounded else "in_process")
+    execution_mode="bounded_inprocess" if bounded else "in_process"
     JOBS[jid]["execution_mode"]=execution_mode
-    threading.Thread(target=target,args=(jid,req,folder),daemon=True,name=("makersence-iso-" if isolated else "makersence-")+jid[:8]).start()
+    threading.Thread(target=_run_generate_job,args=(jid,req,folder),daemon=True,name="makersence-"+jid[:8]).start()
     return {"job_id":jid,"status":"processing","execution_mode":execution_mode}
 
 def inspect_sliced_3mf(path):
@@ -3873,12 +3871,12 @@ class Handler(BaseHTTPRequestHandler):
             if not self.authorized():return
             parts=path.strip("/").split("/")
             if len(parts)!=4:return self.send_json(404,{"error":"not found"})
-            _,_,jid,name=parts;allowed={"model.stl","model.step","model.3mf","preview.glb","source_preview.glb","product_render_main.png","manifest.json","source.blend"}
+            _,_,jid,name=parts;allowed={"model.stl","model.step","model.3mf","preview.glb","source_preview.glb","product_render_main.png","manifest.json"}
             plate_file=bool(re.fullmatch(r"print_plate_\d+\.3mf",name))
             if name not in allowed and not plate_file:return self.send_json(404,{"error":"not found"})
             p=ROOT/jid/name
             if not p.exists():return self.send_json(404,{"error":"not found"})
-            typ="model/3mf" if plate_file else {"model.stl":"model/stl","model.step":"application/step","model.3mf":"model/3mf","preview.glb":"model/gltf-binary","source_preview.glb":"model/gltf-binary","product_render_main.png":"image/png","manifest.json":"application/json","source.blend":"application/x-blender"}.get(name,"application/octet-stream")
+            typ="model/3mf" if plate_file else {"model.stl":"model/stl","model.step":"application/step","model.3mf":"model/3mf","preview.glb":"model/gltf-binary","source_preview.glb":"model/gltf-binary","product_render_main.png":"image/png","manifest.json":"application/json"}.get(name,"application/octet-stream")
             data=p.read_bytes();self.send_response(200);self.send_header("Content-Type",typ);self.send_header("Content-Length",str(len(data)));self.send_header("Content-Disposition",'attachment; filename="'+name+'"');self.end_headers();self.wfile.write(data);return
         self.send_json(404,{"error":"not found"})
     def do_POST(self):
@@ -3922,5 +3920,5 @@ if __name__=="__main__":
         raise SystemExit(_generate_child_cli(sys.argv[2],sys.argv[3]))
     if len(sys.argv)>=4 and sys.argv[1]=="--motion-child":
         raise SystemExit(_motion_child_cli(sys.argv[2],sys.argv[3]))
-    print("MakerSence CAD Worker 2.51.0-motion-exact-prefilter starting on",PORT,"Bambu Studio",BAMBU_VERSION,"available",bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),flush=True)
+    print("MakerSence CAD Worker 2.55.0-generic-runtime-cleanup starting on",PORT,"Bambu Studio",BAMBU_VERSION,"available",bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),flush=True)
     ThreadingHTTPServer(("0.0.0.0",PORT),Handler).serve_forever()
