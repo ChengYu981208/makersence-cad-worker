@@ -8,8 +8,9 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from app import jobs
 from app.assets import put_asset, get_asset
 from app.analyzers import analyze_bytes
+from app.tooling import tooling_status, integration_selftest
 
-VERSION='3.0.0-interface-adapters'
+VERSION='3.1.0-manifold-lib3mf'
 app=FastAPI(title='MakerSence CAD Worker',version=VERSION)
 _bearer=HTTPBearer(auto_error=False)
 
@@ -21,8 +22,9 @@ def auth(c:HTTPAuthorizationCredentials|None=Depends(_bearer)):
 @app.get('/health')
 def health():
     return {
-        'ok':True,'service':'makersence-cad-worker','version':VERSION,'engine':'cadquery+trimesh+shapely',
-        'capabilities':['compact_step_brep','detachable_parts','assembly_render','product_dimensions','open_edges_zero_gate','formal_mesh_render','artifact_reaudit','source_asset_upload','source_interface_section_extraction','INTERFACE_LOCKED_CAD','INTERFACE_MECHANISM_CAD','MECHANISM_CAD','legacy_adapter_bridge'],
+        'ok':True,'service':'makersence-cad-worker','version':VERSION,'engine':'cadquery+trimesh+manifold3d+lib3mf+shapely',
+        'tooling':tooling_status(),
+        'capabilities':['robust_manifold_probe_v1','lib3mf_strict_validation_v1','compact_step_brep','detachable_parts','assembly_render','product_dimensions','open_edges_zero_gate','formal_mesh_render','artifact_reaudit','source_asset_upload','source_interface_section_extraction','INTERFACE_LOCKED_CAD','INTERFACE_MECHANISM_CAD','MECHANISM_CAD','legacy_adapter_bridge'],
         'profiles':['bambu_a1_mini_04'],
         'adapters':{
             'INTERFACE_LOCKED_CAD':'ready','INTERFACE_MECHANISM_CAD':'ready','MECHANISM_CAD':'ready'
@@ -74,3 +76,10 @@ async def analyze_3mf_url(req:Request,_:bool=Depends(auth)):
         return analyze_bytes(data,'3mf')
     except HTTPException:raise
     except Exception as e:raise HTTPException(502,f'3MF download/analyze failed: {e}')
+
+
+@app.get('/v1/tooling-selftest')
+def tooling_selftest(_:bool=Depends(auth)):
+    result=integration_selftest()
+    if result.get('status')!='PASS':return JSONResponse(status_code=503,content=result)
+    return result
