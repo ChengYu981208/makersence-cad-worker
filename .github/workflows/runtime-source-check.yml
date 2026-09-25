@@ -38,3 +38,33 @@ jobs:
         run: |
           ! grep -R "WORKER_SRC_" runtime/heavy runtime/cad-core-v5
           ! grep -R "SLICER_SRC_" runtime/slicer
+      - name: Generic runtime anti-regression
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          paths=[Path("runtime/heavy/app.py"),Path("runtime/cad-core-v5/app.py")]
+          texts={str(p):p.read_text(encoding="utf-8") for p in paths}
+          forbidden_global=[
+              "music_photo_nfc_keepsake",
+              "halloween_pumpkin",
+              "pumpkin_autumn",
+              "smooth_pumpkin_container_v2",
+              "PHOTO_WINDOW",
+              "PHOTO_RECESS",
+              'family=str(c.get("family") or "rounded_plate")',
+          ]
+          forbidden_defs=[
+              "def hybrid_bone_tag(",
+              "def static_functional_utensil_vessel(",
+              "def sculpted_lidded_container(",
+              "def open_box(",
+              "def phone_stand(",
+          ]
+          for name,text in texts.items():
+              for token in forbidden_global+forbidden_defs:
+                  assert token not in text, f"{name}: forbidden legacy specialization returned: {token}"
+              assert "CAD_FAMILY_UNSUPPORTED_USE_UNIVERSAL_CAD_RECIPE" in text, f"{name}: fail-closed router missing"
+              assert "svg_profile_extrusion" in text, f"{name}: generic SVG route missing"
+              assert "formal_geometry_only_render_v1" in text, f"{name}: geometry-only render capability missing"
+          print("GENERIC_RUNTIME_GUARDS_PASS")
+          PY
