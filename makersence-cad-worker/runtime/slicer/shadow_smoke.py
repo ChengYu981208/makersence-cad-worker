@@ -1,4 +1,4 @@
-import json, os, time, zipfile, tempfile, pathlib
+import json, os, time, zipfile, tempfile, pathlib, base64
 from urllib.request import Request, urlopen
 
 BASE="http://127.0.0.1:"+str(os.environ.get("PORT","8080"))
@@ -41,7 +41,8 @@ def cube_3mf():
 
 def main():
     h=req_json("/health")
-    data=cube_3mf()
+    fixture=pathlib.Path(__file__).with_name('fixtures')/'known_good_model_3mf.b64'
+    data=base64.b64decode(fixture.read_text().strip())
     submit=req_json("/v1/slice","POST",data,{"Content-Type":"model/3mf","X-Idempotency-Key":"slicer-shadow-"+str(int(time.time()*1000))},timeout=30)
     jid=submit.get("job_id")
     if not jid:
