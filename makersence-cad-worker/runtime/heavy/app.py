@@ -1288,7 +1288,7 @@ def hybrid_bone_tag(c,req):
     if body.val().isNull() or not body.val().isValid():raise ValueError("HYBRID_BONE_BREP_INVALID")
     if shape_volume(body.intersect(hole))>.001 or shape_volume(body.intersect(pocket))>.001:raise ValueError("HYBRID_BONE_OPENINGS_NOT_CUT")
     hb=hole.val().BoundingBox();pb=pocket.val().BoundingBox();bb=body.val().BoundingBox()
-    req["_hybrid_measured_dims"]={"nfc_pocket_diameter_mm":round(float(pb.xmax-pb.xmin),4),"nfc_pocket_depth_mm":round(float(pb.zmax-max(0.0,bb.zmin)),4),"keyring_hole_diameter_mm":round(float(hb.xmax-hb.xmin),4)}
+    req["_hybrid_measured_dims"]={"nfc_pocket_diameter_mm":round(float(pb.xmax-pb.xmin),4),"nfc_pocket_depth_mm":round(float(pb.zmax-max(0.0,bb.zmin)),4),"keyring_hole_diameter_mm":round(float(hb.xmax-hb.xmin),4),"residual_wall_mm":round(max(0.0,body_t-pocket_depth),4)}
     accent_h=relief*.43
     face_h=relief*.48
     details_h=relief-face_h
