@@ -1404,20 +1404,13 @@ def _vnorm(a):
 def _rgb(s):
     s=color_hex(s);return (int(s[1:3],16),int(s[3:5],16),int(s[5:7],16))
 def _mix(a,b,t):return tuple(int(round(a[i]*(1-t)+b[i]*t)) for i in range(3))
-def _quad_point(q,u,v):
-    a=(q[0][0]*(1-u)+q[1][0]*u,q[0][1]*(1-u)+q[1][1]*u)
-    b=(q[3][0]*(1-u)+q[2][0]*u,q[3][1]*(1-u)+q[2][1]*u)
-    return (a[0]*(1-v)+b[0]*v,a[1]*(1-v)+b[1]*v)
-
 def render_product_png(req,parts,svg_geoms,path,validation,camera_view="perspective",meshes=None):
     render_tol=resource_policy(req)["render_mesh_tolerance_mm"]
     if meshes is None:meshes=tessellated_parts(parts,render_tol,assembled=True)
     allv=[v for m in meshes for v in m["vertices"]]
     if not allv:raise ValueError("render: no mesh vertices")
     final_w,final_h=1400,1050;ss=2;W,H=final_w*ss,final_h*ss
-    intent=((req.get("parameters") or {}).get("manufacturing_profile") or {}).get("research_dna",{}).get("product_intent") or {}
-    warm=str(intent.get("archetype") or "")=="music_photo_nfc_keepsake"
-    top=(244,239,226) if warm else (236,238,235);bot=(210,205,191) if warm else (197,203,198)
+    top=(236,238,235);bot=(197,203,198)
     img=Image.new("RGB",(W,H),top);d=ImageDraw.Draw(img)
     for y in range(H):
         t=y/max(1,H-1);d.line([(0,y),(W,y)],fill=_mix(top,bot,t))
@@ -1445,7 +1438,7 @@ def render_product_png(req,parts,svg_geoms,path,validation,camera_view="perspect
     # Soft floor shadow.
     shadow=Image.new("RGBA",(W,H),(0,0,0,0));sd=ImageDraw.Draw(shadow)
     bx=(min(sx)+max(sx))/2;by=max(sy)+H*.035;bw=(max(sx)-min(sx))*.78;bh=max(H*.035,(max(sy)-min(sy))*.10)
-    sd.ellipse((bx-bw/2,by-bh/2,bx+bw/2,by+bh/2),fill=(25,22,18,95 if warm else 78))
+    sd.ellipse((bx-bw/2,by-bh/2,bx+bw/2,by+bh/2),fill=(25,22,18,78))
     shadow=shadow.filter(ImageFilter.GaussianBlur(max(12,int(28*ss))));img=Image.alpha_composite(img.convert("RGBA"),shadow).convert("RGB")
     d=ImageDraw.Draw(img)
     light=_vnorm((-0.55,-0.35,1.0))
@@ -1468,33 +1461,6 @@ def render_product_png(req,parts,svg_geoms,path,validation,camera_view="perspect
     body=[m for m in meshes if str(m.get("role"))=="body" or str(m.get("name"))=="BODY"]
     raised=[m for m in meshes if m not in body]
     draw_mesh_set(body or meshes)
-    # Product-context insert: a sample photo is rendered only when the Product Intent calls for it.
-    # It is presentation content, not an extra printable solid.
-    if warm and camera_key in ("front","perspective"):
-        photo=None;photo_part=None
-        for p,g in svg_geoms:
-            if str(p.get("id") or "").upper() in ("PHOTO_WINDOW","PHOTO_RECESS"):
-                photo=g;photo_part=p;break
-        if photo is not None and not photo.is_empty:
-            minx,miny,maxx,maxy=photo.bounds
-            thickness=f((req.get("cad_contract") or {}).get("thickness_mm"),3)
-            z=thickness+.025
-            q=[proj((minx,miny,z))[:2],proj((maxx,miny,z))[:2],proj((maxx,maxy,z))[:2],proj((minx,maxy,z))[:2]]
-            # Warm generic keepsake photo: sky + sun + mountains, clipped by constructing bands inside the quad.
-            bands=[((235,178,126),(244,205,156)),((219,151,116),(235,178,126)),((148,126,113),(201,142,113))]
-            for bi,(c0,c1) in enumerate(bands):
-                v0=bi/len(bands);v1=(bi+1)/len(bands)
-                steps=9
-                for j in range(steps):
-                    a0=v0+(v1-v0)*j/steps;a1=v0+(v1-v0)*(j+1)/steps
-                    col=_mix(c0,c1,(j+.5)/steps)
-                    d.polygon([_quad_point(q,0,a0),_quad_point(q,1,a0),_quad_point(q,1,a1),_quad_point(q,0,a1)],fill=col)
-            sun=_quad_point(q,.73,.31);sr=max(5,int(min(abs(q[1][0]-q[0][0]),abs(q[3][1]-q[0][1]))*.075))
-            d.ellipse((sun[0]-sr,sun[1]-sr,sun[0]+sr,sun[1]+sr),fill=(250,225,176))
-            mountain=[_quad_point(q,0,.73),_quad_point(q,.28,.47),_quad_point(q,.47,.70),_quad_point(q,.67,.52),_quad_point(q,1,.76),_quad_point(q,1,1),_quad_point(q,0,1)]
-            d.polygon(mountain,fill=(75,73,66))
-            # faint glass highlight
-            d.line([_quad_point(q,.08,.06),_quad_point(q,.88,.06)],fill=(255,255,255),width=max(2,ss*2))
     if raised:draw_mesh_set(raised)
     # Ground/contact sheen under product.
     d=ImageDraw.Draw(img,"RGBA")
@@ -1504,12 +1470,12 @@ def render_product_png(req,parts,svg_geoms,path,validation,camera_view="perspect
     img.save(str(path),"PNG",optimize=True)
     assembled=any(any(abs(f(v))>1e-9 for v in (p.get("assembly_translate") or [0,0,0])) for p in parts)
     return {
-      "status":"PASS" if camera_ok else "FAIL","mode":"deterministic_product_context",
+      "status":"PASS" if camera_ok else "FAIL","mode":"deterministic_geometry_render",
       "geometry_source":"formal_3mf_parts_assembled" if assembled else "formal_cad_mesh",
       "view":camera_key,"camera_vector":[round(f(x),5) for x in view],
-      "intent_archetype":intent.get("archetype"),"mock_content":["photo_insert"] if warm and camera_key in ("front","perspective") else [],
+      "mock_content":[],
       "camera_ok":camera_ok,"off_canvas":off_canvas,"projected_coverage":round(coverage,4),"minimum_coverage":min_coverage,
-      "note":"Mock content is presentation-only; product geometry is rendered from the same formal parts exported to 3MF."
+      "note":"Render contains only formal CAD/3MF geometry; no product-specific mock content is injected."
     }
 
 def audit_print_plate_3mf(path,expected_names,build_volume):
@@ -2359,7 +2325,7 @@ def analyze_source_file_bytes(data,fmt):
     return {"format":"STEP","file_size_bytes":len(data),"shape_count":len(shapes),"solid_count":solids,"face_count":faces,"bounds_mm":{"min":[round(x,3) for x in lo],"max":[round(x,3) for x in hi],"dimensions":[round(x,3) for x in dims]},"a1_mini_fit":all(x<=180.0001 for x in dims),"analysis_quality":"CAD_BREP_BOUNDS"}
 
 class Handler(BaseHTTPRequestHandler):
-    server_version="MakerSenceCAD/2.11.0-fail-closed-family-router"
+    server_version="MakerSenceCAD/2.12.0-generic-geometry-render"
     def log_message(self,fmt,*args):print(fmt%args,flush=True)
     def send_json(self,code,obj):
         data=json.dumps(obj,ensure_ascii=False).encode("utf-8")
@@ -2370,7 +2336,7 @@ class Handler(BaseHTTPRequestHandler):
         return True
     def do_GET(self):
         path=urlparse(self.path).path
-        if path=="/health":return self.send_json(200,{"ok":True,"service":"makersence-cad-worker","version":"2.11.0-fail-closed-family-router","engine":"cadquery+svgpathtools+shapely+pillow","bambu_slicer":{"available":bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),"engine":"Bambu Studio","version":BAMBU_VERSION},"capabilities":["compact_step_brep","bambu_native_parts","detachable_parts","assembly_render","product_dimensions","open_edges_zero_gate","formal_mesh_render","multi_view_real_geometry_render_v1","artifact_reaudit","rectangular_blind_pockets","geometry_intent_gate","orphan_geometry_gate","unintended_through_cut_gate","welded_3mf_meshes","exported_3mf_topology_gate","true_font_outline_text","high_smooth_vector_mesh","multilingual_font_fallback","actual_text_stroke_gate","adaptive_cjk_regular_first","cjk_internal_clearance_gate","cjk_counter_preservation_gate","text_mesh_topology_candidate_gate","remote_3mf_stream_analyzer","remote_3mf_xml_iterparse","remote_3mf_transform_aware_bounds","remote_3mf_cad_drawing_v1","remote_3mf_reconstruction_sections_v2","auto_hole_slot_detection","auto_fillet_chamfer_candidates","auto_section_view_plan","multipart_dimension_semantics","supplementary_stl_step_analyzer","generic_memory_budget_v1","streaming_3mf_glb_export","auto_text_boldening","typography_layout_bounds","script_aware_glyph_spacing","glyph_clearance_gate","text_readability_gate","bambu_04_text_profile","text_slicer_no_merge_gate","separate_structural_text_min_feature","arachne_text_project_settings","bambu_cli_real_slice","gcode_3mf_toolpath_gate","print_ready_plate_3mf","plate_part_coverage_gate","universal_cad_recipe_v2","section_loft_reconstruction_v1","section_loft_open_cavity_v2","axisymmetric_revolve_reconstruction_v1","isolated_universal_jobs_v1","planar_prismatic_reconstruction_v1","fail_closed_family_router_v1","svg_profile_extrusion_v1"],"profiles":["bambu_a1_mini_04"]})
+        if path=="/health":return self.send_json(200,{"ok":True,"service":"makersence-cad-worker","version":"2.12.0-generic-geometry-render","engine":"cadquery+svgpathtools+shapely+pillow","bambu_slicer":{"available":bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),"engine":"Bambu Studio","version":BAMBU_VERSION},"capabilities":["compact_step_brep","bambu_native_parts","detachable_parts","assembly_render","product_dimensions","open_edges_zero_gate","formal_mesh_render","multi_view_real_geometry_render_v1","artifact_reaudit","rectangular_blind_pockets","geometry_intent_gate","orphan_geometry_gate","unintended_through_cut_gate","welded_3mf_meshes","exported_3mf_topology_gate","true_font_outline_text","high_smooth_vector_mesh","multilingual_font_fallback","actual_text_stroke_gate","adaptive_cjk_regular_first","cjk_internal_clearance_gate","cjk_counter_preservation_gate","text_mesh_topology_candidate_gate","remote_3mf_stream_analyzer","remote_3mf_xml_iterparse","remote_3mf_transform_aware_bounds","remote_3mf_cad_drawing_v1","remote_3mf_reconstruction_sections_v2","auto_hole_slot_detection","auto_fillet_chamfer_candidates","auto_section_view_plan","multipart_dimension_semantics","supplementary_stl_step_analyzer","generic_memory_budget_v1","streaming_3mf_glb_export","auto_text_boldening","typography_layout_bounds","script_aware_glyph_spacing","glyph_clearance_gate","text_readability_gate","bambu_04_text_profile","text_slicer_no_merge_gate","separate_structural_text_min_feature","arachne_text_project_settings","bambu_cli_real_slice","gcode_3mf_toolpath_gate","print_ready_plate_3mf","plate_part_coverage_gate","universal_cad_recipe_v2","section_loft_reconstruction_v1","section_loft_open_cavity_v2","axisymmetric_revolve_reconstruction_v1","isolated_universal_jobs_v1","planar_prismatic_reconstruction_v1","fail_closed_family_router_v1","svg_profile_extrusion_v1","formal_geometry_only_render_v1"],"profiles":["bambu_a1_mini_04"]})
         if path.startswith("/v1/jobs/"):
             if not self.authorized():return
             jid=path.split("/")[-1];j=JOBS.get(jid)
@@ -2427,5 +2393,5 @@ class Handler(BaseHTTPRequestHandler):
 if __name__=="__main__":
     if len(sys.argv)>=4 and sys.argv[1]=="--generate-child":
         raise SystemExit(_generate_child_cli(sys.argv[2],sys.argv[3]))
-    print("MakerSence CAD Worker 2.11.0-fail-closed-family-router starting on",PORT,"Bambu Studio",BAMBU_VERSION,"available",bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),flush=True)
+    print("MakerSence CAD Worker 2.12.0-generic-geometry-render starting on",PORT,"Bambu Studio",BAMBU_VERSION,"available",bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),flush=True)
     ThreadingHTTPServer(("0.0.0.0",PORT),Handler).serve_forever()
