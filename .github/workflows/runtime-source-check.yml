@@ -31,9 +31,9 @@ jobs:
       - name: Runtime version markers
         run: |
           grep -F "2.55.0-generic-runtime-cleanup" runtime/heavy/app.py
-          grep -F "2.10.5-universal-static" runtime/cad-core-v5/app.py
+          grep -F "2.10.8-generic-cleanup" runtime/cad-core-v5/app.py
           grep -F "1.1.11" runtime/slicer/app.py
-          grep -F "3.0.0-interface-adapters" app/main.py
+          grep -F "3.1.0-manifold-lib3mf" app/main.py
       - name: No source-chunk dependency in packaged runtimes
         run: |
           ! grep -R "WORKER_SRC_" runtime/heavy runtime/cad-core-v5
