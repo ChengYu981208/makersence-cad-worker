@@ -749,57 +749,6 @@ def _clip_ellipse_envelope(shape,width,depth,height):
     limit=cq.Workplane("XY").ellipse(max(.1,width/2),max(.1,depth/2)).extrude(max(.1,height))
     return shape.intersect(limit)
 
-def _seat_on_z0(shape):
-    # Seating is a BREP bounds operation, not a mesh operation. Avoid an
-    # unnecessary full tessellation before formal mesh QA on organic solids.
-    try:
-        bb=shape.val().BoundingBox()
-        z0=float(bb.zmin)
-        return shape.translate((0,0,-z0)) if abs(z0)>1e-6 else shape
-    except Exception:
-        return shape
-
-def _lobed_profile_points(width,depth,lobes=8,amp=.07,samples=72,scale=1.0,phase=0.0,max_points=72):
-    width=max(8.0,f(width,80));depth=max(8.0,f(depth,width));lobes=max(4,min(16,int(lobes or 8)))
-    amp=max(0.0,min(.16,float(amp)));max_points=max(24,min(120,int(max_points or 72)));samples=max(24,min(max_points,int(samples or max_points)))
-    pts=[]
-    denom=1.0+amp
-    for i in range(samples):
-        a=2*math.pi*i/samples
-        mod=(1.0+amp*math.cos(lobes*a+phase))/denom
-        pts.append((math.cos(a)*width*.5*scale*mod,math.sin(a)*depth*.5*scale*mod))
-    return pts
-
-_LOBED_BBOX_COMP_CACHE={}
-def _lobed_bbox_compensation(lobes,amp,phase,samples,max_points):
-    key=(int(lobes),round(float(amp),6),round(float(phase),6),int(samples),int(max_points))
-    hit=_LOBED_BBOX_COMP_CACHE.get(key)
-    if hit:return hit
-    nominal=100.0
-    pts=_lobed_profile_points(nominal,nominal,lobes,amp,samples,1.0,phase,max_points)
-    wire=cq.Workplane("XY").spline(pts,periodic=True,makeWire=True).val()
-    bb=wire.BoundingBox();xlen=max(.001,float(bb.xmax-bb.xmin));ylen=max(.001,float(bb.ymax-bb.ymin))
-    comp=(nominal/xlen,nominal/ylen)
-    _LOBED_BBOX_COMP_CACHE[key]=comp
-    return comp
-
-def _lobed_loft(width,depth,sections,lobes=8,amp=.07,phase=0.0,max_points=72):
-    sections=sorted(sections,key=lambda x:x[0])
-    if len(sections)<2:raise ValueError("lobed loft needs >=2 sections")
-    samples=max(36,min(int(max_points or 72),int(max(36,lobes*5))))
-    # Periodic splines can overshoot control points, and even lobe counts such as
-    # 10 can place a trough on one Cartesian axis. Compensate using the actual
-    # spline wire bounds so width/depth remain contract dimensions.
-    _,max_sc,max_aa=max(sections,key=lambda x:f(x[1],1))
-    cx,cy=_lobed_bbox_compensation(lobes,amp*f(max_aa,1),phase,samples,max_points)
-    width=f(width)*cx;depth=f(depth)*cy
-    z0,sc0,a0=sections[0]
-    wp=cq.Workplane("XY").workplane(offset=f(z0)).spline(_lobed_profile_points(width,depth,lobes,amp*f(a0,1),samples,f(sc0,1),phase,max_points),periodic=True,makeWire=True)
-    last=f(z0)
-    for z,sc,aa in sections[1:]:
-        z=f(z);wp=wp.workplane(offset=z-last).spline(_lobed_profile_points(width,depth,lobes,amp*f(aa,1),samples,f(sc,1),phase,max_points),periodic=True,makeWire=True);last=z
-    return wp.loft(combine=True,ruled=False)
-
 def _u_signed_area(loop):
     pts=list(loop or [])
     if len(pts)<3:return 0.0
@@ -2423,7 +2372,7 @@ def analyze_source_file_bytes(data,fmt):
     return {"format":"STEP","file_size_bytes":len(data),"shape_count":len(shapes),"solid_count":solids,"face_count":faces,"bounds_mm":{"min":[round(x,3) for x in lo],"max":[round(x,3) for x in hi],"dimensions":[round(x,3) for x in dims]},"a1_mini_fit":all(x<=180.0001 for x in dims),"analysis_quality":"CAD_BREP_BOUNDS"}
 
 class Handler(BaseHTTPRequestHandler):
-    server_version="MakerSenceCAD/2.10.7-generic-cleanup"
+    server_version="MakerSenceCAD/2.10.8-generic-cleanup"
     def log_message(self,fmt,*args):print(fmt%args,flush=True)
     def send_json(self,code,obj):
         data=json.dumps(obj,ensure_ascii=False).encode("utf-8")
@@ -2434,7 +2383,7 @@ class Handler(BaseHTTPRequestHandler):
         return True
     def do_GET(self):
         path=urlparse(self.path).path
-        if path=="/health":return self.send_json(200,{"ok":True,"service":"makersence-cad-worker","version":"2.10.7-generic-cleanup","engine":"cadquery+svgpathtools+shapely+pillow","bambu_slicer":{"available":bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),"engine":"Bambu Studio","version":BAMBU_VERSION},"capabilities":["compact_step_brep","bambu_native_parts","detachable_parts","assembly_render","product_dimensions","open_edges_zero_gate","formal_mesh_render","multi_view_real_geometry_render_v1","artifact_reaudit","rectangular_blind_pockets","geometry_intent_gate","orphan_geometry_gate","unintended_through_cut_gate","welded_3mf_meshes","exported_3mf_topology_gate","true_font_outline_text","high_smooth_vector_mesh","multilingual_font_fallback","actual_text_stroke_gate","adaptive_cjk_regular_first","cjk_internal_clearance_gate","cjk_counter_preservation_gate","text_mesh_topology_candidate_gate","remote_3mf_stream_analyzer","remote_3mf_xml_iterparse","remote_3mf_transform_aware_bounds","remote_3mf_cad_drawing_v1","remote_3mf_reconstruction_sections_v2","auto_hole_slot_detection","auto_fillet_chamfer_candidates","auto_section_view_plan","multipart_dimension_semantics","supplementary_stl_step_analyzer","generic_memory_budget_v1","streaming_3mf_glb_export","auto_text_boldening","typography_layout_bounds","script_aware_glyph_spacing","glyph_clearance_gate","text_readability_gate","bambu_04_text_profile","text_slicer_no_merge_gate","separate_structural_text_min_feature","arachne_text_project_settings","bambu_cli_real_slice","gcode_3mf_toolpath_gate","print_ready_plate_3mf","plate_part_coverage_gate","universal_cad_recipe_v2","section_loft_reconstruction_v1","section_loft_open_cavity_v2","axisymmetric_revolve_reconstruction_v1","isolated_universal_jobs_v1","planar_prismatic_reconstruction_v1"],"profiles":["bambu_a1_mini_04"]})
+        if path=="/health":return self.send_json(200,{"ok":True,"service":"makersence-cad-worker","version":"2.10.8-generic-cleanup","engine":"cadquery+svgpathtools+shapely+pillow","bambu_slicer":{"available":bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),"engine":"Bambu Studio","version":BAMBU_VERSION},"capabilities":["compact_step_brep","bambu_native_parts","detachable_parts","assembly_render","product_dimensions","open_edges_zero_gate","formal_mesh_render","multi_view_real_geometry_render_v1","artifact_reaudit","rectangular_blind_pockets","geometry_intent_gate","orphan_geometry_gate","unintended_through_cut_gate","welded_3mf_meshes","exported_3mf_topology_gate","true_font_outline_text","high_smooth_vector_mesh","multilingual_font_fallback","actual_text_stroke_gate","adaptive_cjk_regular_first","cjk_internal_clearance_gate","cjk_counter_preservation_gate","text_mesh_topology_candidate_gate","remote_3mf_stream_analyzer","remote_3mf_xml_iterparse","remote_3mf_transform_aware_bounds","remote_3mf_cad_drawing_v1","remote_3mf_reconstruction_sections_v2","auto_hole_slot_detection","auto_fillet_chamfer_candidates","auto_section_view_plan","multipart_dimension_semantics","supplementary_stl_step_analyzer","generic_memory_budget_v1","streaming_3mf_glb_export","auto_text_boldening","typography_layout_bounds","script_aware_glyph_spacing","glyph_clearance_gate","text_readability_gate","bambu_04_text_profile","text_slicer_no_merge_gate","separate_structural_text_min_feature","arachne_text_project_settings","bambu_cli_real_slice","gcode_3mf_toolpath_gate","print_ready_plate_3mf","plate_part_coverage_gate","universal_cad_recipe_v2","section_loft_reconstruction_v1","section_loft_open_cavity_v2","axisymmetric_revolve_reconstruction_v1","isolated_universal_jobs_v1","planar_prismatic_reconstruction_v1"],"profiles":["bambu_a1_mini_04"]})
         if path.startswith("/v1/jobs/"):
             if not self.authorized():return
             jid=path.split("/")[-1];j=JOBS.get(jid)
@@ -2491,5 +2440,5 @@ class Handler(BaseHTTPRequestHandler):
 if __name__=="__main__":
     if len(sys.argv)>=4 and sys.argv[1]=="--generate-child":
         raise SystemExit(_generate_child_cli(sys.argv[2],sys.argv[3]))
-    print("MakerSence CAD Worker 2.10.5-universal-static starting on",PORT,"Bambu Studio",BAMBU_VERSION,"available",bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),flush=True)
+    print("MakerSence CAD Worker 2.10.8-generic-cleanup starting on",PORT,"Bambu Studio",BAMBU_VERSION,"available",bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),flush=True)
     ThreadingHTTPServer(("0.0.0.0",PORT),Handler).serve_forever()
