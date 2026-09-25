@@ -30,7 +30,7 @@ jobs:
         run: bash -n runtime/slicer/start.sh
       - name: Runtime version markers
         run: |
-          grep -F "2.51.0-motion-exact-prefilter" runtime/heavy/app.py
+          grep -F "2.55.0-generic-runtime-cleanup" runtime/heavy/app.py
           grep -F "2.10.5-universal-static" runtime/cad-core-v5/app.py
           grep -F "1.1.11" runtime/slicer/app.py
           grep -F "3.0.0-interface-adapters" app/main.py
