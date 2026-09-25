@@ -84,7 +84,10 @@ def main():
       "error":(job or {}).get("error"),"checks":checks,
       "package_mode":v.get("package_mode"),"native_slice_completed":v.get("native_slice_completed"),
       "native_returncode":v.get("native_returncode"),"output_3mf_bytes":v.get("output_3mf_bytes"),
-      "artifact_bytes":artifact_bytes
+      "artifact_bytes":artifact_bytes,
+      "slicedata":v.get("slicedata"),
+      "recovery":v.get("recovery"),
+      "log_tail":str((job or {}).get("log_tail") or "")[-8000:]
     }
     print("SLICER_SHADOW_SMOKE_RESULT="+json.dumps(result,separators=(",",":"),ensure_ascii=False),flush=True)
     return 0 if passed else 3
