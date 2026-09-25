@@ -7,6 +7,7 @@ import trimesh
 import cadquery as cq
 from app.assets import put_asset
 from app.geometry.reference import mesh_summary, load_reference_mesh
+from app.tooling import manifold_probe, validate_3mf_bytes
 
 
 def analyze_bytes(data:bytes,fmt:str)->dict[str,Any]:
@@ -19,6 +20,8 @@ def analyze_bytes(data:bytes,fmt:str)->dict[str,Any]:
             'bounds_mm':s['bounds_mm'],'measurement_quality':'MEASURED_WORKER_V3','watertight':bool(m.is_watertight),
             'assembly_analysis':{'part_count':_count_parts(data,fmt),'multipart':_count_parts(data,fmt)>1},
             'engineering_features':{'opening_candidates':[],'thickness_candidates':[],'clearance_candidates':[]},
+            'manifold_probe':manifold_probe(m),
+            'lib3mf_validation':validate_3mf_bytes(data) if fmt=='3mf' else {'status':'NOT_APPLICABLE'},
             'reference_asset_id':a.asset_id
         }
     if fmt=='step':
