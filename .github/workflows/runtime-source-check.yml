@@ -147,7 +147,7 @@ jobs:
           print("DESIGN_MODEL_ROUTER_SOURCE_GUARDS_PASS")
           modal_app=Path("integrations/modal_triposg/app.py").read_text(encoding="utf-8")
           assert 'TRIPOSG_SOURCE_COMMIT = "fc5c40990181e2a756c4e0b1c2f4d6b5202faf8c"' in modal_app
-          assert 'gpu="A10G"' in modal_app
+          assert 'gpu="T4"' in modal_app
           assert "MAKERSENCE_MODAL_SHARED_TOKEN" in modal_app
           assert "SOURCE_IMAGE_URL_PRIVATE_HOST_FORBIDDEN" in modal_app
           assert "model/gltf-binary" in modal_app
