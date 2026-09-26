@@ -1,4 +1,4 @@
-import os, json, time, uuid, pathlib, threading, subprocess, zipfile, re, hashlib, shutil, ctypes.util
+import os, json, time, uuid, pathlib, threading, subprocess, zipfile, re, hashlib, shutil, ctypes.util, ipaddress
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 from urllib.request import Request, build_opener, HTTPRedirectHandler
@@ -468,15 +468,27 @@ class H(BaseHTTPRequestHandler):
     def private_request(self):
         raw_host=str(self.headers.get("Host") or "").strip().lower()
         host=raw_host.split(":",1)[0]
-        ok=bool(PRIVATE_DOMAIN and host==PRIVATE_DOMAIN)
+        forwarded_host=str(self.headers.get("X-Forwarded-Host") or "").strip().lower()
+        forwarded_proto=str(self.headers.get("X-Forwarded-Proto") or "").strip().lower()
+        client=str((self.client_address or [""])[0]).strip()
+        try:
+            ip=ipaddress.ip_address(client)
+            private_client=bool(ip.is_private or ip.is_loopback or ip.is_link_local)
+        except Exception:
+            private_client=False
+        internal_host=host.endswith(".railway.internal")
+        no_public_forwarding=not forwarded_host and not forwarded_proto
+        ok=bool(internal_host and private_client and no_public_forwarding)
         if not ok:
             try:
                 print("MAKERSENCE_PRIVATE_PROXY_REJECT",json.dumps({
                   "host":raw_host,
-                  "forwarded_host":str(self.headers.get("X-Forwarded-Host") or "").strip().lower(),
-                  "forwarded_proto":str(self.headers.get("X-Forwarded-Proto") or "").strip().lower(),
-                  "client":str((self.client_address or [""])[0]),
-                  "private_domain":PRIVATE_DOMAIN
+                  "forwarded_host":forwarded_host,
+                  "forwarded_proto":forwarded_proto,
+                  "client":client,
+                  "internal_host":internal_host,
+                  "private_client":private_client,
+                  "no_public_forwarding":no_public_forwarding
                 },sort_keys=True),flush=True)
             except Exception:pass
         return ok
