@@ -128,7 +128,7 @@ def _fetch_source_image(url: str) -> bytes:
 @app.cls(
     image=triposg_image,
     gpu="T4",
-    timeout=600,
+    timeout=1800,
     volumes={"/models": model_volume},
 )
 class TripoSGModel:
@@ -192,7 +192,7 @@ class TripoSGModel:
 @app.function(
     image=web_image,
     secrets=[shared_secret],
-    timeout=660,
+    timeout=1860,
 )
 @modal.asgi_app()
 def api():
