@@ -1376,7 +1376,7 @@ def design_model_hybrid(c,req):
     mesh=json.loads(mesh_json.read_text(encoding="utf-8"))
     repair=mesh.get("repair") or {}
     print("MAKERSENCE_HYBRID_MESH_REPAIR",json.dumps(repair,ensure_ascii=False,sort_keys=True)[:5000],flush=True)
-    ev=_dw_mesh_brep_evidence(mesh,{"topology_stability":0.0,"sections":[]})
+    ev=_dw_mesh_brep_evidence(mesh,{"topology_stability":0.0,"sections":[]},preserve_closed_topology=True)
     if not ev or str(ev.get("status") or "").lower()!="ready":
         detail=ev or {}
         raise ValueError("DESIGN_MODEL_HYBRID_MESH_BREP_UNAVAILABLE:"+str(detail.get("reason") or "unknown")
@@ -3082,7 +3082,7 @@ def _u_planar_multiloop_shape(ev):
     if comp.isNull() or not comp.isValid():raise ValueError("UNIVERSAL_PLANAR_MULTI_LOOP_BREP_INVALID")
     return cq.Workplane("XY").newObject([comp])
 
-def _dw_mesh_brep_evidence(mesh,reconstruction):
+def _dw_mesh_brep_evidence(mesh,reconstruction,preserve_closed_topology=False):
     vv=mesh.get("vertices") or [];tt=mesh.get("triangles") or []
     counts=[len(s.get("profile_loops") or []) for s in (reconstruction or {}).get("sections") or []]
     inner_idx=[i for i,n in enumerate(counts) if n>=2]
@@ -3092,7 +3092,12 @@ def _dw_mesh_brep_evidence(mesh,reconstruction):
     if len(tt)<4 or len(tt)>30000 or len(vv)>18000:
         return {"status":"unavailable","reason":"mesh_budget_exceeded","vertex_count":len(vv),"triangle_count":len(tt)}
     try:
-        cleaned=clean_mesh_data(vv,tt,.02);cv,ct=cleaned["vertices"],cleaned["triangles"]
+        raw_stats=mesh_edge_stats(vv,tt)
+        if preserve_closed_topology and int(raw_stats.get("open_edges") or 0)==0 and int(raw_stats.get("nonmanifold_edges") or 0)==0:
+            cleaned={"vertices":vv,"triangles":tt,"weld_eps_mm":0.0,**raw_stats}
+        else:
+            cleaned=clean_mesh_data(vv,tt,.02)
+        cv,ct=cleaned["vertices"],cleaned["triangles"]
         if int(cleaned.get("open_edges") or 0)!=0 or int(cleaned.get("nonmanifold_edges") or 0)!=0:
             return {"status":"unavailable","reason":"source_mesh_not_closed_manifold","open_edges":cleaned.get("open_edges"),"nonmanifold_edges":cleaned.get("nonmanifold_edges"),"vertex_count":len(cv),"triangle_count":len(ct)}
         max_edge=0.0
