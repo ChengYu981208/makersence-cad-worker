@@ -154,3 +154,42 @@ Required GitHub repository secrets before running it:
 - MAKERSENCE_MODAL_SHARED_TOKEN
 
 The workflow checks out the selected source ref, validates the pinned TripoSG source/GPU declaration, creates or updates the Modal shared secret, then runs `modal deploy` with a rolling strategy.
+
+
+## Update — real Modal deployment attempts and current external gate
+
+Real GitHub Actions deployment was executed using the repository secret `MODAL_TOKEN_SET_COMMAND`. The workflow successfully:
+- parsed Modal API credentials
+- authenticated to Modal
+- created/updated `makersence-triposg-shared`
+- validated the pinned TripoSG source
+
+Build issues discovered and fixed:
+1. `diso` PEP-517 build isolation could not see PyTorch.
+   - fixed by installing TripoSG requirements without `diso`, then installing `diso` with `--no-build-isolation`
+2. `diso` required wheel/ninja/build tools.
+   - added wheel, setuptools, ninja, build-essential
+3. `diso` required CUDA headers and Linux g++.
+   - switched to CUDA devel image
+   - forced CC=gcc / CXX=g++
+   - exposed CUDA_HOME/include/lib paths
+
+The final image build succeeded, including:
+- PyTorch CUDA 12.4 install
+- TripoSG dependencies
+- `diso-0.1.4` wheel successfully built and installed
+
+Modal then rejected deployment because the workspace has no payment method.
+Observed real deployment errors:
+- A10G: `Please add a payment method to use A10G GPU functions.`
+- T4: `Please add a payment method to use T4 GPU functions.`
+
+Therefore the blocker is now ACCOUNT/BILLING, not source code, dependency resolution, GPU image build, GitHub secrets, or Modal authentication.
+
+Current target is T4 because it has 16 GB VRAM, exceeds TripoSG's stated minimum 8 GB VRAM, and is cheaper than A10-class GPU for validation. GPU choice can be raised later if latency is unacceptable; quality is model-dependent, not improved by using A10G instead of T4 for the same inference settings.
+
+### Current gate
+
+User must add a payment method in Modal before any GPU function can be deployed on this workspace. After that, re-trigger `Deploy Modal TripoSG`; no further credential setup is required.
+
+Do NOT redo the dependency/image fixes above unless a new build error appears.
