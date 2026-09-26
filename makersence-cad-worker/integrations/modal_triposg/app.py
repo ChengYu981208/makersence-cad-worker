@@ -28,7 +28,7 @@ triposg_image = (
         "nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04",
         add_python="3.10",
     )
-    .apt_install("git", "build-essential", "libgl1", "libglib2.0-0", "libxrender1", "libxext6")
+    .apt_install("git", "build-essential", "libgl1", "libopengl0", "libglib2.0-0", "libxrender1", "libxext6")
     .env({
         "CUDA_HOME": "/usr/local/cuda",
         "CC": "gcc",
