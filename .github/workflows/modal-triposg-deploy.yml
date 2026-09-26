@@ -73,7 +73,7 @@ jobs:
           PY
 
       - name: Install Modal
-        run: python -m pip install "modal>=1.5,<2"
+        run: python -m pip install "modal>=1.5,<2" requests
 
       - name: Validate provider source
         run: |
@@ -128,7 +128,8 @@ jobs:
         run: |
           set -euo pipefail
           python - <<'PY'
-          import hashlib, json, os, struct, urllib.request, urllib.error
+          import hashlib, json, os, struct
+          import requests
           endpoint=os.environ["MODAL_TRIPOSG_ENDPOINT"].rstrip("/")+"/generate"
           payload={
               "contract_version":"makersence-design-model-v1",
@@ -138,24 +139,25 @@ jobs:
               "target_faces":2000,
               "output_format":"glb",
           }
-          req=urllib.request.Request(
-              endpoint,
-              data=json.dumps(payload).encode(),
-              headers={
-                  "Content-Type":"application/json",
-                  "Authorization":"Bearer "+os.environ["MAKERSENCE_MODAL_SHARED_TOKEN"],
-              },
-              method="POST",
-          )
           try:
-              with urllib.request.urlopen(req, timeout=2100) as r:
-                  data=r.read(64_000_001)
-                  status=r.status
-                  ctype=(r.headers.get("Content-Type") or "").split(";",1)[0].lower()
-                  expected_sha=r.headers.get("X-MakerSence-Artifact-Sha256") or ""
-          except urllib.error.HTTPError as e:
-              body=e.read(4000).decode("utf-8","replace")
-              raise SystemExit(f"generate HTTP {e.code}: {body}")
+              r=requests.post(
+                  endpoint,
+                  json=payload,
+                  headers={
+                      "Authorization":"Bearer "+os.environ["MAKERSENCE_MODAL_SHARED_TOKEN"],
+                  },
+                  timeout=2100,
+                  allow_redirects=True,
+              )
+          except requests.RequestException as exc:
+              raise SystemExit(f"generate request failed: {exc}")
+          if r.status_code != 200:
+              body=r.text[:4000]
+              raise SystemExit(f"generate HTTP {r.status_code}: {body}")
+          data=r.content[:64_000_001]
+          status=r.status_code
+          ctype=(r.headers.get("Content-Type") or "").split(";",1)[0].lower()
+          expected_sha=r.headers.get("X-MakerSence-Artifact-Sha256") or ""
           if status != 200:
               raise SystemExit(f"generate status={status}")
           if ctype != "model/gltf-binary":
