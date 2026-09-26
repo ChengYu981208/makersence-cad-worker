@@ -34,7 +34,9 @@ triposg_image = (
         f"cd /opt/TripoSG && git checkout {TRIPOSG_SOURCE_COMMIT}",
         "python -m pip install --upgrade pip",
         "python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124",
-        "python -m pip install -r /opt/TripoSG/requirements.txt",
+        "grep -v '^diso' /opt/TripoSG/requirements.txt > /tmp/triposg-requirements-no-diso.txt",
+        "python -m pip install -r /tmp/triposg-requirements-no-diso.txt",
+        "python -m pip install --no-build-isolation diso",
     )
 )
 
