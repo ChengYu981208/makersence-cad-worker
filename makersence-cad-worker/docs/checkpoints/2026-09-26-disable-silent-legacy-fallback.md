@@ -110,3 +110,36 @@ A new v4-only change is staged, NOT DEPLOYED:
 ## Deployment gate
 
 All source tests and ephemeral runtime checks are green. The next action is an explicit production deployment acceptance for the v4-only staged commit-pin removal. Do not add other staged changes before that deploy.
+
+
+## Update — production v4 deployment complete
+
+Production deployment:
+- deployment: 8dec0e52-23f0-4530-8d75-7b444a95c631
+- deployed commit: d2005d7633c3d526537395db108e65fae76bc9f2
+- branch: consolidation/runtime-snapshots-20260925
+- status: SUCCESS
+- source.commitSha pin is removed; v4 now tracks the branch
+- v4 staged config: null
+
+Production gates passed:
+- image build: completed
+- pre-deploy pytest: 8 passed, 1 warning
+- application startup: completed
+- /health: HTTP 200
+- active replica: 1/1
+- no recent crashes/failures across all five Railway services
+- latest deployment canRollback=true
+- previous v4 deployment decaeceb-2344-43d1-ba00-33300bbc4093 remains rollback-capable
+
+The production pytest suite explicitly includes:
+- test_missing_strategy_fails_closed_instead_of_plate_fallback
+and verifies missing generation_strategy/adapter returns the explicit fail-closed error rather than LEGACY/silhouette_plate.
+
+Authenticated external POST smoke requests could not be sent through the connected Railway OAuth because WORKER_TOKEN values are redacted and the Railway agent cannot issue custom-header/body HTTP calls. No secret was requested or exposed. Equivalent runtime behavior was validated by the production pre-deploy suite plus the full ephemeral engineering/heavy/cad-core real-job shadow suite.
+
+Railway may still report an empty pending-work reference febcbfb1-1cd5-462e-890e-b221969f3753 with changes: []; it contains no staged service diff. get_service_config reports v4 staged=null.
+
+## Gate result
+
+The silent legacy fallback cleanup and v4 deployment stage is COMPLETE. The next mainline task is new-tool integration, starting with a small reversible design-model-router/TripoSG+Modal integration step. Do not re-open product-specific fallback work unless new evidence requires it.
