@@ -143,7 +143,7 @@ def _modal_triposg(req):
     payload = json.dumps(req, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     http_req = Request(endpoint,data=payload,headers=headers,method="POST")
     try:
-        timeout = max(30, min(600, int(_env("MODAL_TRIPOSG_TIMEOUT_SEC") or "240")))
+        timeout = max(30, min(2400, int(_env("MODAL_TRIPOSG_TIMEOUT_SEC") or "240")))
     except Exception:
         timeout = 240
 
