@@ -37,6 +37,8 @@ triposg_image = (
         "CPLUS_INCLUDE_PATH": "/usr/local/cuda/include",
         "LIBRARY_PATH": "/usr/local/cuda/lib64",
         "LD_LIBRARY_PATH": "/usr/local/cuda/lib64",
+        "FORCE_CUDA": "1",
+        "TORCH_CUDA_ARCH_LIST": "7.5;8.6",
     })
     .run_commands(
         "test -f /usr/local/cuda/include/cuda_runtime.h",
@@ -47,7 +49,8 @@ triposg_image = (
         "python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124",
         "grep -v '^diso' /opt/TripoSG/requirements.txt > /tmp/triposg-requirements-no-diso.txt",
         "python -m pip install -r /tmp/triposg-requirements-no-diso.txt",
-        "CUDA_HOME=/usr/local/cuda CC=gcc CXX=g++ CPATH=/usr/local/cuda/include CPLUS_INCLUDE_PATH=/usr/local/cuda/include LIBRARY_PATH=/usr/local/cuda/lib64 LD_LIBRARY_PATH=/usr/local/cuda/lib64 python -m pip install --no-build-isolation diso",
+        "FORCE_CUDA=1 TORCH_CUDA_ARCH_LIST='7.5;8.6' CUDA_HOME=/usr/local/cuda CC=gcc CXX=g++ CPATH=/usr/local/cuda/include CPLUS_INCLUDE_PATH=/usr/local/cuda/include LIBRARY_PATH=/usr/local/cuda/lib64 LD_LIBRARY_PATH=/usr/local/cuda/lib64 python -m pip install --no-build-isolation diso",
+        "python -c \"import diso; print('DISO_IMPORT_OK')\"",
     )
 )
 
