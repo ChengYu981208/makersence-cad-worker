@@ -1,0 +1,58 @@
+name: Modal TripoSG Diagnostics
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".modal-diagnostics-trigger"
+
+permissions:
+  contents: read
+
+jobs:
+  logs:
+    runs-on: ubuntu-22.04
+    env:
+      MODAL_TOKEN_SET_COMMAND: ${{ secrets.MODAL_TOKEN_SET_COMMAND }}
+    steps:
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Parse Modal credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$MODAL_TOKEN_SET_COMMAND"
+          python - <<'PY'
+          import os, shlex
+          parts=shlex.split(os.environ["MODAL_TOKEN_SET_COMMAND"])
+          def arg(name):
+              for i,p in enumerate(parts):
+                  if p==name and i+1<len(parts):
+                      return parts[i+1]
+                  if p.startswith(name+"="):
+                      return p.split("=",1)[1]
+              raise SystemExit("missing "+name)
+          token_id=arg("--token-id")
+          token_secret=arg("--token-secret")
+          print("::add-mask::"+token_id)
+          print("::add-mask::"+token_secret)
+          with open(os.environ["GITHUB_ENV"],"a",encoding="utf-8") as fh:
+              fh.write("MODAL_TOKEN_ID="+token_id+"\n")
+              fh.write("MODAL_TOKEN_SECRET="+token_secret+"\n")
+          PY
+
+      - name: Install Modal
+        run: python -m pip install "modal>=1.5,<2"
+
+      - name: Fetch TripoSG app logs
+        run: |
+          modal app logs makersence-triposg \
+            --since 30m \
+            --tail 2000 \
+            --timestamps \
+            --show-function-id \
+            --show-container-id
