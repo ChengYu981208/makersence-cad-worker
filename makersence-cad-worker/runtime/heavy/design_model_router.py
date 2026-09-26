@@ -21,18 +21,35 @@ def _env(name):
 def design_model_provider_status():
     endpoint = _env("MODAL_TRIPOSG_ENDPOINT")
     token = _env("MODAL_TRIPOSG_TOKEN")
+    proxy = _env("MODAL_TRIPOSG_PROXY_URL")
     return {
         "contract_version": CONTRACT_VERSION,
         "providers": {
             "modal_triposg": {
-                "configured": bool(endpoint and token),
+                "configured": bool((endpoint and token) or proxy),
+                "direct_configured": bool(endpoint and token),
                 "endpoint_configured": bool(endpoint),
                 "token_configured": bool(token),
+                "private_proxy_configured": bool(proxy),
             }
         },
         "default_provider": _env("MAKERSENCE_DESIGN_MODEL_PROVIDER") or None,
         "fail_closed": True,
     }
+
+
+def _validate_private_proxy_url(value):
+    raw = str(value or "").strip()
+    try:
+        parsed = urlparse(raw)
+    except Exception as exc:
+        raise DesignModelProviderError("DESIGN_MODEL_PROXY_URL_INVALID") from exc
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if parsed.scheme.lower() != "http" or not host.endswith(".railway.internal"):
+        raise DesignModelProviderError("DESIGN_MODEL_PROXY_PRIVATE_URL_REQUIRED")
+    if not parsed.path or parsed.path == "/":
+        raise DesignModelProviderError("DESIGN_MODEL_PROXY_PATH_REQUIRED")
+    return raw
 
 
 def _validate_https_url(value, field):
@@ -103,22 +120,28 @@ def _normalize_request(req):
 def _modal_triposg(req):
     endpoint = _env("MODAL_TRIPOSG_ENDPOINT")
     token = _env("MODAL_TRIPOSG_TOKEN")
-    if not endpoint or not token:
-        raise DesignModelProviderError("DESIGN_MODEL_PROVIDER_NOT_CONFIGURED:modal_triposg")
-    endpoint = _validate_https_url(endpoint, "modal_triposg_endpoint")
-
-    payload = json.dumps(req, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-    http_req = Request(
-        endpoint,
-        data=payload,
-        headers={
+    proxy = _env("MODAL_TRIPOSG_PROXY_URL")
+    use_proxy = not (endpoint and token)
+    if use_proxy:
+        if not proxy:
+            raise DesignModelProviderError("DESIGN_MODEL_PROVIDER_NOT_CONFIGURED:modal_triposg")
+        endpoint = _validate_private_proxy_url(proxy)
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "model/gltf-binary",
+            "User-Agent": "MakerSence-Heavy/DesignModelRouter-v1-private-proxy",
+        }
+    else:
+        endpoint = _validate_https_url(endpoint, "modal_triposg_endpoint")
+        headers = {
             "Authorization": "Bearer " + token,
             "Content-Type": "application/json",
             "Accept": "model/gltf-binary",
             "User-Agent": "MakerSence-Heavy/DesignModelRouter-v1",
-        },
-        method="POST",
-    )
+        }
+
+    payload = json.dumps(req, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    http_req = Request(endpoint,data=payload,headers=headers,method="POST")
     try:
         timeout = max(30, min(600, int(_env("MODAL_TRIPOSG_TIMEOUT_SEC") or "240")))
     except Exception:
