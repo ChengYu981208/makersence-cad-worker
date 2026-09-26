@@ -1,4 +1,4 @@
-import os, json, time, uuid, pathlib, threading, subprocess, zipfile, re, hashlib, shutil, ctypes.util, ipaddress
+import os, json, time, uuid, pathlib, threading, subprocess, zipfile, re, hashlib, shutil, ctypes.util, ipaddress, base64, hmac
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 from urllib.request import Request, build_opener, HTTPRedirectHandler
@@ -8,7 +8,21 @@ PORT=int(os.environ.get("PORT","8080"))
 TOKEN=os.environ.get("SLICER_TOKEN","")
 PRIVATE_DOMAIN=os.environ.get("RAILWAY_PRIVATE_DOMAIN","").strip().lower()
 MODAL_SHARED_TOKEN=os.environ.get("MAKERSENCE_MODAL_SHARED_TOKEN","").strip()
+MODAL_TOKEN_ID=os.environ.get("MODAL_TOKEN_ID","").strip()
+MODAL_TOKEN_SECRET=os.environ.get("MODAL_TOKEN_SECRET","").strip()
 MODAL_TRIPOSG_ENDPOINT=os.environ.get("MODAL_TRIPOSG_ENDPOINT","https://zhbettychien--makersence-triposg-api.modal.run/generate").strip()
+
+def effective_modal_shared_token():
+    if MODAL_SHARED_TOKEN:
+        return MODAL_SHARED_TOKEN
+    if MODAL_TOKEN_ID.startswith("ak-") and MODAL_TOKEN_SECRET.startswith("as-"):
+        digest=hmac.new(
+            MODAL_TOKEN_SECRET.encode(),
+            ("makersence-modal-shared-v1:"+MODAL_TOKEN_ID).encode(),
+            hashlib.sha256
+        ).digest()
+        return base64.urlsafe_b64encode(digest).decode().rstrip("=")
+    return ""
 BAMBU_BIN=os.environ.get("BAMBU_BIN","")
 BAMBU_VERSION=os.environ.get("BAMBU_VERSION","2.8.2.61")
 DISPLAY_MODE=os.environ.get("BAMBU_DISPLAY_MODE","hybrid_wayland")
@@ -409,7 +423,8 @@ class _PreservePostRedirect(HTTPRedirectHandler):
         return super().redirect_request(req,fp,code,msg,headers,newurl)
 
 def triposg_proxy(payload):
-    if not MODAL_SHARED_TOKEN:raise ValueError("modal shared token unavailable")
+    shared_token=effective_modal_shared_token()
+    if not shared_token:raise ValueError("modal shared token unavailable")
     if not isinstance(payload,dict):raise ValueError("invalid json body")
     provider=str(payload.get("provider") or "modal_triposg")
     mode=str(payload.get("mode") or "image_to_3d")
@@ -432,7 +447,7 @@ def triposg_proxy(payload):
       "output_format":"glb"
     },ensure_ascii=False,separators=(",",":")).encode("utf-8")
     req=Request(MODAL_TRIPOSG_ENDPOINT,data=body,headers={
-      "Authorization":"Bearer "+MODAL_SHARED_TOKEN,
+      "Authorization":"Bearer "+shared_token,
       "Content-Type":"application/json",
       "Accept":"model/gltf-binary",
       "User-Agent":"MakerSence-v3-PrivateProxy/1"
