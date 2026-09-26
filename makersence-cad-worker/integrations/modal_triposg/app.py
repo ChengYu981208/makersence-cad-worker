@@ -29,14 +29,25 @@ triposg_image = (
         add_python="3.10",
     )
     .apt_install("git", "build-essential", "libgl1", "libglib2.0-0", "libxrender1", "libxext6")
+    .env({
+        "CUDA_HOME": "/usr/local/cuda",
+        "CC": "gcc",
+        "CXX": "g++",
+        "CPATH": "/usr/local/cuda/include",
+        "CPLUS_INCLUDE_PATH": "/usr/local/cuda/include",
+        "LIBRARY_PATH": "/usr/local/cuda/lib64",
+        "LD_LIBRARY_PATH": "/usr/local/cuda/lib64",
+    })
     .run_commands(
+        "test -f /usr/local/cuda/include/cuda_runtime.h",
+        "g++ --version",
         "git clone https://github.com/VAST-AI-Research/TripoSG.git /opt/TripoSG",
         f"cd /opt/TripoSG && git checkout {TRIPOSG_SOURCE_COMMIT}",
         "python -m pip install --upgrade pip wheel setuptools ninja",
         "python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124",
         "grep -v '^diso' /opt/TripoSG/requirements.txt > /tmp/triposg-requirements-no-diso.txt",
         "python -m pip install -r /tmp/triposg-requirements-no-diso.txt",
-        "python -m pip install --no-build-isolation diso",
+        "CUDA_HOME=/usr/local/cuda CC=gcc CXX=g++ CPATH=/usr/local/cuda/include CPLUS_INCLUDE_PATH=/usr/local/cuda/include LIBRARY_PATH=/usr/local/cuda/lib64 LD_LIBRARY_PATH=/usr/local/cuda/lib64 python -m pip install --no-build-isolation diso",
     )
 )
 
