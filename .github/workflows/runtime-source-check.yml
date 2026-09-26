@@ -24,6 +24,7 @@ jobs:
         run: |
           python -m py_compile runtime/heavy/app.py
           python -m py_compile runtime/heavy/design_model_router.py
+          python -m py_compile integrations/modal_triposg/app.py
           python -m py_compile runtime/cad-core-v5/app.py
           python -m py_compile runtime/slicer/app.py
           python -m compileall -q app
@@ -144,4 +145,13 @@ jobs:
           assert '"design_model_provider_router_v1"' in heavy
           assert 'path=="/v1/design-model/generate"' in heavy
           print("DESIGN_MODEL_ROUTER_SOURCE_GUARDS_PASS")
+          modal_app=Path("integrations/modal_triposg/app.py").read_text(encoding="utf-8")
+          assert 'TRIPOSG_SOURCE_COMMIT = "fc5c40990181e2a756c4e0b1c2f4d6b5202faf8c"' in modal_app
+          assert 'gpu="A10G"' in modal_app
+          assert "MAKERSENCE_MODAL_SHARED_TOKEN" in modal_app
+          assert "SOURCE_IMAGE_URL_PRIVATE_HOST_FORBIDDEN" in modal_app
+          assert "model/gltf-binary" in modal_app
+          assert "TRIPOSG_GLB_MAGIC_INVALID" in modal_app
+          assert "modal.asgi_app" in modal_app
+          print("MODAL_TRIPOSG_SCAFFOLD_GUARDS_PASS")
           PY
