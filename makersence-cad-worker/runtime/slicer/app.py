@@ -432,12 +432,36 @@ def submit(data,key=None):
     return {"job_id":jid,"status":"processing"}
 
 
-class _PreservePostRedirect(HTTPRedirectHandler):
+class _ModalRedirectHandler(HTTPRedirectHandler):
     def redirect_request(self,req,fp,code,msg,headers,newurl):
-        # 303 means "retrieve the result with GET".  Modal uses this after
-        # long-running web endpoint calls.  Only 307/308 preserve POST by spec.
-        if code in (307,308) and req.get_method()=="POST":
-            return Request(newurl,data=req.data,headers=dict(req.headers),method="POST")
+        method=req.get_method()
+        try:
+            old_host=(urlparse(req.full_url).hostname or "").lower()
+            new_host=(urlparse(newurl).hostname or "").lower()
+            print("MAKERSENCE_MODAL_REDIRECT",json.dumps({
+              "code":int(code),"from_method":method,
+              "from_host":old_host,"to_host":new_host,
+              "to_path":urlparse(newurl).path[:240]
+            },sort_keys=True),flush=True)
+        except Exception:
+            old_host="";new_host=""
+        if code==303:
+            # Modal intentionally emits a 303 after ~150s for long-running Web
+            # Functions. Resume URLs MUST be fetched with GET and without the
+            # original request body/content headers.
+            kept={}
+            for k,v in req.headers.items():
+                lk=k.lower()
+                if lk in ("content-length","content-type"):
+                    continue
+                if lk=="authorization" and old_host and new_host and old_host!=new_host:
+                    continue
+                kept[k]=v
+            return Request(newurl,headers=kept,method="GET",
+                           origin_req_host=req.origin_req_host,unverifiable=True)
+        if code in (307,308):
+            return Request(newurl,data=req.data,headers=dict(req.headers),method=method,
+                           origin_req_host=req.origin_req_host,unverifiable=True)
         return super().redirect_request(req,fp,code,msg,headers,newurl)
 
 def triposg_proxy(payload):
@@ -470,7 +494,7 @@ def triposg_proxy(payload):
       "Accept":"model/gltf-binary",
       "User-Agent":"MakerSence-v3-PrivateProxy/1"
     },method="POST")
-    opener=build_opener(_PreservePostRedirect())
+    opener=build_opener(_ModalRedirectHandler())
     try:
         with opener.open(req,timeout=MODAL_TRIPOSG_TIMEOUT_SEC) as res:
             status=int(getattr(res,"status",200) or 200)
