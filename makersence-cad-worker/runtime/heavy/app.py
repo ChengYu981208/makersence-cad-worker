@@ -1179,6 +1179,69 @@ import bpy,bmesh,json,sys,math
 args=sys.argv[sys.argv.index("--")+1:]
 glb_path,spec_path,out_path,blend_path=args[:4]
 spec=json.load(open(spec_path,encoding="utf-8"))
+target=[float(x) for x in spec["target_dimensions_mm"]]
+max_faces=max(500,min(12000,int(spec.get("max_faces") or 6000)))
+
+def mesh_stats(obj):
+    bm=bmesh.new();bm.from_mesh(obj.data)
+    open_edges=sum(1 for e in bm.edges if len(e.link_faces)==1)
+    nonmanifold_edges=sum(1 for e in bm.edges if len(e.link_faces)==0 or len(e.link_faces)>2)
+    out={"open_edges":int(open_edges),"nonmanifold_edges":int(nonmanifold_edges),
+         "vertices":len(bm.verts),"edges":len(bm.edges),"faces":len(bm.faces)}
+    bm.free();return out
+
+def fit_target(obj,target):
+    verts=[v.co.copy() for v in obj.data.vertices]
+    if not verts:raise RuntimeError("DESIGN_MODEL_GLB_EMPTY_MESH")
+    mn=[min(v[i] for v in verts) for i in range(3)]
+    mx=[max(v[i] for v in verts) for i in range(3)]
+    dims=[mx[i]-mn[i] for i in range(3)]
+    if any((not math.isfinite(x) or x<=1e-8) for x in dims):
+        raise RuntimeError("DESIGN_MODEL_GLB_ZERO_EXTENT")
+    scale=[target[i]/dims[i] for i in range(3)]
+    for v in obj.data.vertices:
+        v.co.x=(v.co.x-mn[0])*scale[0]
+        v.co.y=(v.co.y-mn[1])*scale[1]
+        v.co.z=(v.co.z-mn[2])*scale[2]
+    obj.data.update()
+
+def clean_and_fill(obj,target,allow_fill=True):
+    bm=bmesh.new();bm.from_mesh(obj.data)
+    bm.verts.ensure_lookup_table();bm.edges.ensure_lookup_table();bm.faces.ensure_lookup_table()
+    before={"open_edges":sum(1 for e in bm.edges if len(e.link_faces)==1),
+            "nonmanifold_edges":sum(1 for e in bm.edges if len(e.link_faces)==0 or len(e.link_faces)>2)}
+    eps=max(0.002,min(0.05,min(target)/2000.0))
+    if bm.verts:bmesh.ops.remove_doubles(bm,verts=bm.verts[:],dist=eps)
+    if bm.edges:bmesh.ops.dissolve_degenerate(bm,dist=max(0.001,eps*.25),edges=bm.edges[:])
+    bm.verts.ensure_lookup_table();bm.edges.ensure_lookup_table();bm.faces.ensure_lookup_table()
+    boundary=[e for e in bm.edges if len(e.link_faces)==1]
+    fill_limit=max(48,int(max(1,len(bm.edges))*.12))
+    filled=False
+    if allow_fill and boundary and len(boundary)<=fill_limit:
+        try:
+            bmesh.ops.holes_fill(bm,edges=boundary,sides=0)
+            filled=True
+        except Exception:
+            filled=False
+    bm.faces.ensure_lookup_table()
+    if bm.faces:bmesh.ops.recalc_face_normals(bm,faces=bm.faces[:])
+    bm.faces.ensure_lookup_table()
+    if bm.faces:bmesh.ops.triangulate(bm,faces=bm.faces[:])
+    bm.verts.ensure_lookup_table();bm.edges.ensure_lookup_table();bm.faces.ensure_lookup_table()
+    after={"open_edges":sum(1 for e in bm.edges if len(e.link_faces)==1),
+           "nonmanifold_edges":sum(1 for e in bm.edges if len(e.link_faces)==0 or len(e.link_faces)>2)}
+    bm.to_mesh(obj.data);bm.free();obj.data.update()
+    return {"before":before,"after":after,"weld_eps_mm":eps,
+            "boundary_edges_seen":len(boundary),"fill_limit":fill_limit,"holes_fill_applied":filled}
+
+def decimate_to_budget(obj,max_faces):
+    if len(obj.data.polygons)<=max_faces:return False
+    mod=obj.modifiers.new(name="MakerSence_Decimate",type="DECIMATE")
+    mod.ratio=max(0.02,min(1.0,max_faces/max(1,len(obj.data.polygons))))
+    bpy.context.view_layer.objects.active=obj
+    bpy.ops.object.modifier_apply(modifier=mod.name)
+    return True
+
 bpy.ops.object.select_all(action="SELECT");bpy.ops.object.delete(use_global=False)
 bpy.ops.import_scene.gltf(filepath=glb_path)
 objs=[o for o in bpy.context.scene.objects if o.type=="MESH"]
@@ -1189,31 +1252,51 @@ bpy.context.view_layer.objects.active=objs[0]
 if len(objs)>1:bpy.ops.object.join()
 obj=bpy.context.view_layer.objects.active
 bpy.ops.object.transform_apply(location=True,rotation=True,scale=True)
-max_faces=max(500,min(12000,int(spec.get("max_faces") or 6000)))
-if len(obj.data.polygons)>max_faces:
-    mod=obj.modifiers.new(name="MakerSence_Decimate",type="DECIMATE")
-    mod.ratio=max(0.02,min(1.0,max_faces/max(1,len(obj.data.polygons))))
+
+# Work in final millimetre scale so repair tolerances are physically meaningful.
+fit_target(obj,target)
+pre=mesh_stats(obj)
+repair1=clean_and_fill(obj,target,True)
+mid=mesh_stats(obj)
+repair_strategy="none" if pre["open_edges"]==0 and pre["nonmanifold_edges"]==0 else "clean_fill"
+voxel_size_mm=None
+
+# Small seam/hole cleanup is preferred. Only use voxel remesh when the mesh is
+# still not closed-manifold; this is the general fail-safe for generative meshes.
+if mid["open_edges"] or mid["nonmanifold_edges"]:
+    voxel_size_mm=max(0.30,min(0.80,min(target)/120.0))
+    obj.data.remesh_mode="VOXEL"
+    obj.data.remesh_voxel_size=voxel_size_mm
+    obj.data.remesh_voxel_adaptivity=0.0
     bpy.context.view_layer.objects.active=obj
-    bpy.ops.object.modifier_apply(modifier=mod.name)
-bm=bmesh.new();bm.from_mesh(obj.data);bmesh.ops.triangulate(bm,faces=bm.faces[:]);bm.to_mesh(obj.data);bm.free()
-verts=[v.co.copy() for v in obj.data.vertices]
-if not verts:raise RuntimeError("DESIGN_MODEL_GLB_EMPTY_MESH")
-mn=[min(v[i] for v in verts) for i in range(3)]
-mx=[max(v[i] for v in verts) for i in range(3)]
-dims=[mx[i]-mn[i] for i in range(3)]
-if any((not math.isfinite(x) or x<=1e-8) for x in dims):raise RuntimeError("DESIGN_MODEL_GLB_ZERO_EXTENT")
-target=[float(x) for x in spec["target_dimensions_mm"]]
-scale=[target[i]/dims[i] for i in range(3)]
-for v in obj.data.vertices:
-    v.co.x=(v.co.x-mn[0])*scale[0]
-    v.co.y=(v.co.y-mn[1])*scale[1]
-    v.co.z=(v.co.z-mn[2])*scale[2]
-bpy.context.view_layer.objects.active=obj
-bpy.ops.object.transform_apply(location=True,rotation=True,scale=True)
-bm=bmesh.new();bm.from_mesh(obj.data);bmesh.ops.triangulate(bm,faces=bm.faces[:]);bm.to_mesh(obj.data);bm.free()
+    obj.select_set(True)
+    bpy.ops.object.voxel_remesh()
+    fit_target(obj,target)
+    repair2=clean_and_fill(obj,target,True)
+    repair_strategy="voxel_remesh"
+else:
+    repair2=None
+
+# Remeshing can increase polygon count. Bring it back to the requested budget,
+# then run one final topology cleanup and exact dimension normalization.
+decimated=decimate_to_budget(obj,max_faces)
+repair3=clean_and_fill(obj,target,True)
+fit_target(obj,target)
+final_cleanup=clean_and_fill(obj,target,True)
+fit_target(obj,target)
+final=mesh_stats(obj)
+
 vv=[[float(v.co.x),float(v.co.y),float(v.co.z)] for v in obj.data.vertices]
 tt=[[int(i) for i in p.vertices] for p in obj.data.polygons if len(p.vertices)==3]
-payload={"vertices":vv,"triangles":tt,"target_dimensions_mm":target,"vertex_count":len(vv),"triangle_count":len(tt)}
+payload={
+  "vertices":vv,"triangles":tt,"target_dimensions_mm":target,
+  "vertex_count":len(vv),"triangle_count":len(tt),
+  "repair":{
+    "strategy":repair_strategy,"pre":pre,"after_primary":mid,"final":final,
+    "voxel_size_mm":voxel_size_mm,"decimated":bool(decimated),
+    "primary":repair1,"fallback":repair2,"post_budget":repair3,"final_cleanup":final_cleanup
+  }
+}
 with open(out_path,"w",encoding="utf-8") as fh:json.dump(payload,fh,separators=(",",":"))
 bpy.ops.wm.save_as_mainfile(filepath=blend_path,check_existing=False)
 '''
@@ -1271,8 +1354,13 @@ def design_model_hybrid(c,req):
     run=subprocess.run([BLENDER_BIN,"--background","--factory-startup","--python",str(script),"--",str(glb),str(spec),str(mesh_json),str(blend)],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=180)
     if run.returncode!=0 or not mesh_json.exists():raise ValueError("DESIGN_MODEL_HYBRID_BLENDER_FAILED:"+run.stdout[-1800:])
     mesh=json.loads(mesh_json.read_text(encoding="utf-8"))
+    repair=mesh.get("repair") or {}
+    print("MAKERSENCE_HYBRID_MESH_REPAIR",json.dumps(repair,ensure_ascii=False,sort_keys=True)[:5000],flush=True)
     ev=_dw_mesh_brep_evidence(mesh,{"topology_stability":0.0,"sections":[]})
-    if not ev or str(ev.get("status") or "").lower()!="ready":raise ValueError("DESIGN_MODEL_HYBRID_MESH_BREP_UNAVAILABLE:"+str((ev or {}).get("reason") or "unknown"))
+    if not ev or str(ev.get("status") or "").lower()!="ready":
+        detail=ev or {}
+        raise ValueError("DESIGN_MODEL_HYBRID_MESH_BREP_UNAVAILABLE:"+str(detail.get("reason") or "unknown")
+                         +":open="+str(detail.get("open_edges"))+":nonmanifold="+str(detail.get("nonmanifold_edges")))
     body=_u_faceted_mesh_brep_shape(ev)
     body=_u_normalize_origin(body)
     body,functional_meta=_hybrid_apply_functional_core(body,c)
@@ -1283,7 +1371,7 @@ def design_model_hybrid(c,req):
       "provider_version":routed.get("provider_version"),"provider_sha256":routed.get("artifact_sha256"),
       "source_image_url":image_url,"concept_approved":True,"mesh_brep_status":ev.get("status"),
       "mesh_vertex_count":ev.get("vertex_count"),"mesh_triangle_count":ev.get("triangle_count"),
-      "functional_core":functional_meta,"required_signature_ids":required,
+      "mesh_repair":repair,"functional_core":functional_meta,"required_signature_ids":required,
       "signature_bindings":[],"signature_bindings_ok":len(required)==0,
       "note":"Appearance came from an approved concept image through the design-model provider; final semantic/theme fidelity still requires render QA."
     }
