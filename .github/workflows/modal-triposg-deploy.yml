@@ -79,7 +79,7 @@ jobs:
         run: |
           python -m py_compile makersence-cad-worker/integrations/modal_triposg/app.py
           grep -F 'TRIPOSG_SOURCE_COMMIT = "fc5c40990181e2a756c4e0b1c2f4d6b5202faf8c"' makersence-cad-worker/integrations/modal_triposg/app.py
-          grep -F 'gpu="A10G"' makersence-cad-worker/integrations/modal_triposg/app.py
+          grep -F 'gpu="T4"' makersence-cad-worker/integrations/modal_triposg/app.py
 
       - name: Create or update provider shared secret
         shell: bash
