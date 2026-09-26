@@ -176,20 +176,6 @@ def validate_3mf_file(path:Path)->dict[str,Any]:
     if get_wrapper is None:
         return {'status':'UNAVAILABLE','available':False}
     try:
-        svg=b'''<svg xmlns="http://www.w3.org/2000/svg" width="40mm" height="20mm" viewBox="0 0 40 20"><rect x="1" y="1" width="38" height="18" rx="3"/><text x="6" y="13" font-size="7">MS</text></svg>'''
-        norm=normalize_svg_bytes(svg)
-        checks['inkscape_svg_normalize']=norm.get('status')=='PASS' and norm.get('output_tag_counts',{}).get('text',0)==0 and norm.get('output_tag_counts',{}).get('image',0)==0
-        evidence['inkscape_svg_normalize']={k:v for k,v in norm.items() if k!='normalized_svg'}
-        bad=b'''<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><image href="data:image/png;base64,AA==" width="10" height="10"/></svg>'''
-        rejected=normalize_svg_bytes(bad)
-        checks['inkscape_reject_raster']=rejected.get('status')=='FAIL' and rejected.get('error')=='RASTER_IMAGE_FORBIDDEN'
-        evidence['inkscape_reject_raster']=rejected
-    except Exception as e:
-        checks['inkscape_svg_normalize']=False
-        checks['inkscape_reject_raster']=False
-        evidence['inkscape_svg_normalize']={'error':str(e)}
-
-    try:
         wrapper=get_wrapper()
         model=wrapper.CreateModel()
         reader=model.QueryReader('3mf')
@@ -251,6 +237,21 @@ def integration_selftest()->dict[str,Any]:
     status=tooling_status()
     checks={}
     evidence={}
+
+    try:
+        svg=b'''<svg xmlns="http://www.w3.org/2000/svg" width="40mm" height="20mm" viewBox="0 0 40 20"><rect x="1" y="1" width="38" height="18" rx="3"/><text x="6" y="13" font-size="7">MS</text></svg>'''
+        norm=normalize_svg_bytes(svg)
+        checks['inkscape_svg_normalize']=norm.get('status')=='PASS' and norm.get('output_tag_counts',{}).get('text',0)==0 and norm.get('output_tag_counts',{}).get('image',0)==0
+        evidence['inkscape_svg_normalize']={k:v for k,v in norm.items() if k!='normalized_svg'}
+        bad=b'''<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><image href="data:image/png;base64,AA==" width="10" height="10"/></svg>'''
+        rejected=normalize_svg_bytes(bad)
+        checks['inkscape_reject_raster']=rejected.get('status')=='FAIL' and rejected.get('error')=='RASTER_IMAGE_FORBIDDEN'
+        evidence['inkscape_reject_raster']=rejected
+    except Exception as e:
+        checks['inkscape_svg_normalize']=False
+        checks['inkscape_reject_raster']=False
+        evidence['inkscape_svg_normalize']={'error':str(e)}
+
     try:
         outer=Manifold.cube((20.0,20.0,6.0),True)
         inner=Manifold.cube((8.0,8.0,8.0),True)

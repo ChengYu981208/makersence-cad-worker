@@ -254,11 +254,11 @@ jobs:
                 "edge_softening_mm":0.8,
                 "signature_bindings":[]
               },
-              "holes":[{"name":"NEUTRAL_THROUGH_HOLE","x_mm":-12,"y_mm":0,"diameter_mm":5,"through":true}],
+              "holes":[{"name":"NEUTRAL_THROUGH_HOLE","x_mm":-12,"y_mm":0,"diameter_mm":5,"through":True}],
               "pockets":[],
               "expected_parts":[{"name":"BODY","role":"main_body","physical_separate":true,"editable_separate":true}]
             },
-            "parameters":{"manufacturing_profile":{"printer_profile":"bambu_a1_mini_04","build_volume_mm":[180,180,180],"nozzle_mm":0.4,"max_colors":4,"min_feature_mm":0.8,"min_text_stroke_mm":0.8,"text_line_width_mm":0.42,"text_cjk_gap_mm":0.8,"text_cjk_internal_gap_mm":0.8,"text_latin_gap_mm":0.8,"wall_generator":"arachne","xy_clearance_mm":0.25,"gradient":false}}
+            "parameters":{"manufacturing_profile":{"printer_profile":"bambu_a1_mini_04","build_volume_mm":[180,180,180],"nozzle_mm":0.4,"max_colors":4,"min_feature_mm":0.8,"min_text_stroke_mm":0.8,"text_line_width_mm":0.42,"text_cjk_gap_mm":0.8,"text_cjk_internal_gap_mm":0.8,"text_latin_gap_mm":0.8,"wall_generator":"arachne","xy_clearance_mm":0.25,"gradient":False}}
           }
           req=urllib.request.Request(base+"/v1/generate",data=json.dumps(payload).encode(),headers={"Authorization":"Bearer "+token,"Content-Type":"application/json"},method="POST")
           with urllib.request.urlopen(req,timeout=10) as r:submitted=json.load(r)
@@ -376,7 +376,7 @@ jobs:
       - name: Health and tooling selftest
         run: |
           python - <<'PY'
-          import json,time,urllib.request
+          import json,time,urllib.request,urllib.error
           base="http://127.0.0.1:18001";token="ephemeral-shadow-token"
           health=None
           for _ in range(90):
@@ -394,7 +394,11 @@ jobs:
           if not (tools.get("inkscape") or {}).get("available"):
               raise SystemExit("Inkscape unavailable")
           req=urllib.request.Request(base+"/v1/tooling-selftest",headers={"Authorization":"Bearer "+token})
-          with urllib.request.urlopen(req,timeout=30) as r:selftest=json.load(r)
+          try:
+              with urllib.request.urlopen(req,timeout=30) as r:selftest=json.load(r)
+          except urllib.error.HTTPError as e:
+              detail=e.read().decode("utf-8","replace")
+              raise SystemExit(f"tooling selftest HTTP {e.code}: {detail}")
           if selftest.get("status")!="PASS":
               raise SystemExit("tooling selftest failed: "+json.dumps(selftest,ensure_ascii=False))
           print(json.dumps({"health_version":health["version"],"inkscape":tools.get("inkscape"),"checks":selftest.get("checks")},ensure_ascii=False))
