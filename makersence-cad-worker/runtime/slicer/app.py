@@ -434,7 +434,9 @@ def submit(data,key=None):
 
 class _PreservePostRedirect(HTTPRedirectHandler):
     def redirect_request(self,req,fp,code,msg,headers,newurl):
-        if code in (301,302,303,307,308):
+        # 303 means "retrieve the result with GET".  Modal uses this after
+        # long-running web endpoint calls.  Only 307/308 preserve POST by spec.
+        if code in (307,308) and req.get_method()=="POST":
             return Request(newurl,data=req.data,headers=dict(req.headers),method="POST")
         return super().redirect_request(req,fp,code,msg,headers,newurl)
 
