@@ -7,6 +7,9 @@ on:
     paths:
       - "makersence-cad-worker/runtime/heavy/**"
       - "makersence-cad-worker/runtime/cad-core-v5/**"
+      - "makersence-cad-worker/app/**"
+      - "makersence-cad-worker/Dockerfile"
+      - "makersence-cad-worker/requirements.txt"
       - ".github/workflows/ephemeral-shadow.yml"
   workflow_dispatch:
 
@@ -258,3 +261,84 @@ jobs:
       - name: Stop isolated runtime
         if: always()
         run: docker rm -f makersence-shadow || true
+
+
+  engineering-tooling-shadow:
+    name: Shadow engineering tooling
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build engineering adapter image
+        run: docker build --pull -t makersence-shadow-engineering makersence-cad-worker
+
+      - name: Start engineering adapter
+        run: |
+          docker run -d --name makersence-engineering \
+            -e WORKER_TOKEN=ephemeral-shadow-token \
+            -e PORT=8000 \
+            -p 18001:8000 \
+            makersence-shadow-engineering
+
+      - name: Health and tooling selftest
+        run: |
+          python - <<'PY'
+          import json,time,urllib.request
+          base="http://127.0.0.1:18001";token="ephemeral-shadow-token"
+          health=None
+          for _ in range(90):
+              try:
+                  with urllib.request.urlopen(base+"/health",timeout=3) as r: health=json.load(r)
+                  if health.get("ok"):break
+              except Exception:time.sleep(1)
+          if not health or health.get("version")!="3.2.0-inkscape-svg":
+              raise SystemExit("engineering health failed: "+repr(health))
+          tools=health.get("tooling") or {}
+          if not (tools.get("manifold") or {}).get("available"):
+              raise SystemExit("Manifold unavailable")
+          if not (tools.get("lib3mf") or {}).get("available"):
+              raise SystemExit("lib3mf unavailable")
+          if not (tools.get("inkscape") or {}).get("available"):
+              raise SystemExit("Inkscape unavailable")
+          req=urllib.request.Request(base+"/v1/tooling-selftest",headers={"Authorization":"Bearer "+token})
+          with urllib.request.urlopen(req,timeout=30) as r:selftest=json.load(r)
+          if selftest.get("status")!="PASS":
+              raise SystemExit("tooling selftest failed: "+json.dumps(selftest,ensure_ascii=False))
+          print(json.dumps({"health_version":health["version"],"inkscape":tools.get("inkscape"),"checks":selftest.get("checks")},ensure_ascii=False))
+          PY
+
+      - name: SVG normalize real request
+        run: |
+          python - <<'PY'
+          import json,urllib.request,urllib.error
+          base="http://127.0.0.1:18001";token="ephemeral-shadow-token"
+          svg=b'<svg xmlns="http://www.w3.org/2000/svg" width="40mm" height="20mm" viewBox="0 0 40 20"><rect x="1" y="1" width="38" height="18" rx="3"/><text x="5" y="13" font-size="7">MakerSence</text></svg>'
+          req=urllib.request.Request(base+"/v1/svg/normalize",data=svg,headers={"Authorization":"Bearer "+token,"Content-Type":"image/svg+xml"},method="POST")
+          with urllib.request.urlopen(req,timeout=30) as r:out=json.load(r)
+          if out.get("status")!="PASS":
+              raise SystemExit("SVG normalize failed: "+json.dumps(out,ensure_ascii=False))
+          counts=out.get("output_tag_counts") or {}
+          if counts.get("text",0) or counts.get("image",0):
+              raise SystemExit("normalized SVG still contains forbidden text/image nodes: "+repr(counts))
+          if len(str(out.get("output_sha256") or ""))!=64:
+              raise SystemExit("missing normalized output hash")
+          bad=b'<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><image href="data:image/png;base64,AA==" width="10" height="10"/></svg>'
+          req=urllib.request.Request(base+"/v1/svg/normalize",data=bad,headers={"Authorization":"Bearer "+token,"Content-Type":"image/svg+xml"},method="POST")
+          try:
+              urllib.request.urlopen(req,timeout=15)
+              raise SystemExit("raster SVG unexpectedly accepted")
+          except urllib.error.HTTPError as e:
+              body=json.loads(e.read())
+              if e.code!=422 or body.get("error")!="RASTER_IMAGE_FORBIDDEN":
+                  raise SystemExit("wrong raster rejection: "+str(e.code)+" "+repr(body))
+          print(json.dumps({"status":"PASS","normalized_bytes":out.get("output_bytes"),"output_tag_counts":counts,"inkscape_version":out.get("engine_version")},ensure_ascii=False))
+          PY
+
+      - name: Engineering logs on failure
+        if: failure()
+        run: docker logs --tail 250 makersence-engineering || true
+
+      - name: Stop engineering adapter
+        if: always()
+        run: docker rm -f makersence-engineering || true
