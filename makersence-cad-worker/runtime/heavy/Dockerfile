@@ -6,6 +6,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
     && rm -rf /var/lib/apt/lists/*
 COPY requirements.runtime.txt .
 RUN python -m pip install --no-cache-dir -r requirements.runtime.txt
+COPY design_model_router.py /app/design_model_router.py
 COPY app.py /app/app.py
 ENV BLENDER_BIN=/usr/bin/blender PORT=8000
 EXPOSE 8000
