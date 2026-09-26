@@ -466,8 +466,20 @@ class H(BaseHTTPRequestHandler):
         if not TOKEN:return False
         return self.headers.get("Authorization")=="Bearer "+TOKEN
     def private_request(self):
-        host=str(self.headers.get("Host") or "").split(":",1)[0].strip().lower()
-        return bool(PRIVATE_DOMAIN and host==PRIVATE_DOMAIN)
+        raw_host=str(self.headers.get("Host") or "").strip().lower()
+        host=raw_host.split(":",1)[0]
+        ok=bool(PRIVATE_DOMAIN and host==PRIVATE_DOMAIN)
+        if not ok:
+            try:
+                print("MAKERSENCE_PRIVATE_PROXY_REJECT",json.dumps({
+                  "host":raw_host,
+                  "forwarded_host":str(self.headers.get("X-Forwarded-Host") or "").strip().lower(),
+                  "forwarded_proto":str(self.headers.get("X-Forwarded-Proto") or "").strip().lower(),
+                  "client":str((self.client_address or [""])[0]),
+                  "private_domain":PRIVATE_DOMAIN
+                },sort_keys=True),flush=True)
+            except Exception:pass
+        return ok
     def do_GET(self):
         p=urlparse(self.path).path
         if p=="/health":
