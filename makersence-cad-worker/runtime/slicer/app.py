@@ -11,6 +11,10 @@ MODAL_SHARED_TOKEN=os.environ.get("MAKERSENCE_MODAL_SHARED_TOKEN","").strip()
 MODAL_TOKEN_ID=os.environ.get("MODAL_TOKEN_ID","").strip()
 MODAL_TOKEN_SECRET=os.environ.get("MODAL_TOKEN_SECRET","").strip()
 MODAL_TRIPOSG_ENDPOINT=(os.environ.get("MODAL_TRIPOSG_ENDPOINT") or "https://zhbettychien--makersence-triposg-api.modal.run/generate").strip()
+try:
+    MODAL_TRIPOSG_TIMEOUT_SEC=max(30,min(2400,int(os.environ.get("MODAL_TRIPOSG_TIMEOUT_SEC","2100") or "2100")))
+except Exception:
+    MODAL_TRIPOSG_TIMEOUT_SEC=2100
 
 def modal_credential_status():
     return {
@@ -466,7 +470,7 @@ def triposg_proxy(payload):
     },method="POST")
     opener=build_opener(_PreservePostRedirect())
     try:
-        with opener.open(req,timeout=600) as res:
+        with opener.open(req,timeout=MODAL_TRIPOSG_TIMEOUT_SEC) as res:
             status=int(getattr(res,"status",200) or 200)
             ctype=str(res.headers.get("Content-Type") or "").split(";",1)[0].strip().lower()
             provider_version=str(res.headers.get("X-MakerSence-Provider-Version") or "").strip()
