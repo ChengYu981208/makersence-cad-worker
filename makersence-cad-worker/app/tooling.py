@@ -74,7 +74,12 @@ def normalize_svg_bytes(data:bytes, *, reject_raster:bool=True, max_bytes:int=2_
     p1,p2=Path(n1),Path(n2)
     try:
         p1.write_bytes(bytes(data))
-        cmd=[exe,str(p1),'--export-text-to-path','--export-plain-svg','--export-filename='+str(p2)]
+        # mkstemp creates the output path; remove the empty file so Inkscape never
+        # refuses or ambiguously handles an existing export target.
+        try:p2.unlink()
+        except FileNotFoundError:pass
+        actions='select-all:all;object-to-path;export-plain-svg;export-filename:'+str(p2)+';export-do'
+        cmd=[exe,str(p1),'--batch-process','--actions='+actions]
         proc=subprocess.run(cmd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=45,check=False)
         log=proc.stdout.decode('utf-8','replace')[-5000:]
         if proc.returncode!=0 or not p2.exists() or p2.stat().st_size<32:
