@@ -23,6 +23,7 @@ jobs:
       - name: Python syntax
         run: |
           python -m py_compile runtime/heavy/app.py
+          python -m py_compile runtime/heavy/design_model_router.py
           python -m py_compile runtime/cad-core-v5/app.py
           python -m py_compile runtime/slicer/app.py
           python -m compileall -q app
@@ -30,7 +31,7 @@ jobs:
         run: bash -n runtime/slicer/start.sh
       - name: Runtime version markers
         run: |
-          grep -F "2.60.0-generic-blender-profile" runtime/heavy/app.py
+          grep -F "2.61.0-design-model-router" runtime/heavy/app.py
           grep -F "2.13.0-08mm-typography" runtime/cad-core-v5/app.py
           grep -F "1.1.11" runtime/slicer/app.py
           grep -F "3.2.0-inkscape-svg" app/main.py
@@ -90,4 +91,12 @@ jobs:
           assert "GENERIC_BLENDER_APPEARANCE_PROFILE_NOT_READY" in heavy
           assert "hybrid_bone_tag(" not in heavy
           print("GENERIC_BLENDER_SOURCE_GUARDS_PASS")
+          router=Path("runtime/heavy/design_model_router.py").read_text(encoding="utf-8")
+          assert 'SUPPORTED_PROVIDERS = {"modal_triposg"}' in router
+          assert "DESIGN_MODEL_PROVIDER_NOT_CONFIGURED:modal_triposg" in router
+          assert "DESIGN_MODEL_PROVIDER_UNSUPPORTED:" in router
+          assert "DESIGN_MODEL_PROVIDER_REQUIRED" in router
+          assert '"design_model_provider_router_v1"' in heavy
+          assert 'path=="/v1/design-model/generate"' in heavy
+          print("DESIGN_MODEL_ROUTER_SOURCE_GUARDS_PASS")
           PY
