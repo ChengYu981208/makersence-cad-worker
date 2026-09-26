@@ -477,7 +477,12 @@ def triposg_proxy(payload):
             claimed=str(res.headers.get("X-MakerSence-Artifact-Sha256") or "").strip().lower()
             data=res.read(64_000_001)
     except HTTPError as e:
-        raise ValueError("modal HTTP "+str(e.code))
+        try:
+            detail=e.read(2000).decode("utf-8","replace").strip()
+        except Exception:
+            detail=""
+        detail=re.sub(r"[\r\n\t]+"," ",detail)[:800]
+        raise ValueError("modal HTTP "+str(e.code)+((": "+detail) if detail else ""))
     except (URLError,TimeoutError) as e:
         raise ValueError("modal unreachable")
     if status<200 or status>=300:raise ValueError("modal status "+str(status))
