@@ -127,7 +127,7 @@ def _fetch_source_image(url: str) -> bytes:
 
 @app.cls(
     image=triposg_image,
-    gpu="A10G",
+    gpu="T4",
     timeout=600,
     volumes={"/models": model_volume},
 )
@@ -215,7 +215,7 @@ def api():
             "provider": "modal_triposg",
             "contract_version": CONTRACT_VERSION,
             "source_commit": TRIPOSG_SOURCE_COMMIT,
-            "gpu": "A10G",
+            "gpu": "T4",
             "output_format": "glb",
         }
 
