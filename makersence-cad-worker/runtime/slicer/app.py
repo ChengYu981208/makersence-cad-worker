@@ -12,6 +12,18 @@ MODAL_TOKEN_ID=os.environ.get("MODAL_TOKEN_ID","").strip()
 MODAL_TOKEN_SECRET=os.environ.get("MODAL_TOKEN_SECRET","").strip()
 MODAL_TRIPOSG_ENDPOINT=os.environ.get("MODAL_TRIPOSG_ENDPOINT","https://zhbettychien--makersence-triposg-api.modal.run/generate").strip()
 
+def modal_credential_status():
+    return {
+      "shared_present":bool(MODAL_SHARED_TOKEN),
+      "shared_length":len(MODAL_SHARED_TOKEN),
+      "token_id_present":bool(MODAL_TOKEN_ID),
+      "token_id_length":len(MODAL_TOKEN_ID),
+      "token_id_format":MODAL_TOKEN_ID.startswith("ak-"),
+      "token_secret_present":bool(MODAL_TOKEN_SECRET),
+      "token_secret_length":len(MODAL_TOKEN_SECRET),
+      "token_secret_format":MODAL_TOKEN_SECRET.startswith("as-")
+    }
+
 def effective_modal_shared_token():
     if MODAL_SHARED_TOKEN:
         return MODAL_SHARED_TOKEN
@@ -550,7 +562,8 @@ class H(BaseHTTPRequestHandler):
                 if len(safe)>240:safe=safe[:240]
                 print("MAKERSENCE_MODAL_PROXY_ERROR",json.dumps({
                   "type":type(e).__name__,
-                  "error":safe
+                  "error":safe,
+                  "credential_status":modal_credential_status()
                 },ensure_ascii=False,sort_keys=True),flush=True)
                 return self.json(502,{"error":safe})
         if not self.auth():return self.json(401,{"error":"unauthorized"})
