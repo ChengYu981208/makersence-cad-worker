@@ -1,0 +1,28 @@
+name: worker-tests
+
+on:
+  push:
+    branches:
+      - consolidation/runtime-snapshots-20260925
+      - main
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: makersence-cad-worker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: makersence-cad-worker/requirements.txt
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run worker tests
+        env:
+          PYTHONPATH: .
+        run: pytest -q
