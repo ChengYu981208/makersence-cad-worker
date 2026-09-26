@@ -1211,13 +1211,32 @@ def clean_and_fill(obj,target,allow_fill=True):
     before={"open_edges":sum(1 for e in bm.edges if len(e.link_faces)==1),
             "nonmanifold_edges":sum(1 for e in bm.edges if len(e.link_faces)==0 or len(e.link_faces)>2)}
     eps=max(0.002,min(0.05,min(target)/2000.0))
+
+    # A manifold mesh must not be welded again. The generative voxel fallback
+    # already returns a closed manifold; welding nearby surface vertices can
+    # collapse thin local features and recreate non-manifold edges.
+    if before["open_edges"]==0 and before["nonmanifold_edges"]==0:
+        if bm.faces:bmesh.ops.recalc_face_normals(bm,faces=bm.faces[:])
+        bm.faces.ensure_lookup_table()
+        if bm.faces:bmesh.ops.triangulate(bm,faces=bm.faces[:])
+        bm.verts.ensure_lookup_table();bm.edges.ensure_lookup_table();bm.faces.ensure_lookup_table()
+        after={"open_edges":sum(1 for e in bm.edges if len(e.link_faces)==1),
+               "nonmanifold_edges":sum(1 for e in bm.edges if len(e.link_faces)==0 or len(e.link_faces)>2)}
+        bm.to_mesh(obj.data);bm.free();obj.data.update()
+        return {"before":before,"after":after,"weld_eps_mm":0.0,
+                "boundary_edges_seen":0,"fill_limit":0,"holes_fill_applied":False,
+                "topology_preserved":True}
+
     if bm.verts:bmesh.ops.remove_doubles(bm,verts=bm.verts[:],dist=eps)
     if bm.edges:bmesh.ops.dissolve_degenerate(bm,dist=max(0.001,eps*.25),edges=bm.edges[:])
     bm.verts.ensure_lookup_table();bm.edges.ensure_lookup_table();bm.faces.ensure_lookup_table()
+    interim_nonmanifold=sum(1 for e in bm.edges if len(e.link_faces)==0 or len(e.link_faces)>2)
     boundary=[e for e in bm.edges if len(e.link_faces)==1]
     fill_limit=max(48,int(max(1,len(bm.edges))*.12))
     filled=False
-    if allow_fill and boundary and len(boundary)<=fill_limit:
+    # Fill only ordinary boundary holes. If true non-manifold edges remain,
+    # voxel remesh is the safer general repair path.
+    if allow_fill and interim_nonmanifold==0 and boundary and len(boundary)<=fill_limit:
         try:
             bmesh.ops.holes_fill(bm,edges=boundary,sides=0)
             filled=True
@@ -1232,7 +1251,8 @@ def clean_and_fill(obj,target,allow_fill=True):
            "nonmanifold_edges":sum(1 for e in bm.edges if len(e.link_faces)==0 or len(e.link_faces)>2)}
     bm.to_mesh(obj.data);bm.free();obj.data.update()
     return {"before":before,"after":after,"weld_eps_mm":eps,
-            "boundary_edges_seen":len(boundary),"fill_limit":fill_limit,"holes_fill_applied":filled}
+            "boundary_edges_seen":len(boundary),"fill_limit":fill_limit,"holes_fill_applied":filled,
+            "topology_preserved":False}
 
 def decimate_to_budget(obj,max_faces):
     if len(obj.data.polygons)<=max_faces:return False
