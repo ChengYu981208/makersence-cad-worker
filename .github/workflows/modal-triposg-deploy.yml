@@ -8,6 +8,11 @@ on:
         required: true
         default: consolidation/runtime-snapshots-20260925
         type: string
+  push:
+    branches:
+      - main
+    paths:
+      - ".modal-deploy-trigger"
 
 permissions:
   contents: read
@@ -25,7 +30,7 @@ jobs:
       - name: Checkout selected source
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.source_ref }}
+          ref: ${{ inputs.source_ref || 'consolidation/runtime-snapshots-20260925' }}
 
       - name: Setup Python
         uses: actions/setup-python@v5
