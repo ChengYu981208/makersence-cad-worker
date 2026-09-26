@@ -3,9 +3,10 @@ import io
 import ipaddress
 import json
 import os
+import socket
 import sys
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 import modal
 
@@ -40,21 +41,51 @@ triposg_image = (
 web_image = modal.Image.debian_slim(python_version="3.11").pip_install("fastapi")
 
 
+def _is_forbidden_ip(ip) -> bool:
+    return (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+        or ip.is_unspecified
+    )
+
+
 def _validate_https_url(value: str) -> str:
     raw = str(value or "").strip()
     parsed = urlparse(raw)
     if parsed.scheme.lower() != "https" or not parsed.hostname:
         raise ValueError("SOURCE_IMAGE_URL_HTTPS_REQUIRED")
+    if parsed.username or parsed.password:
+        raise ValueError("SOURCE_IMAGE_URL_USERINFO_FORBIDDEN")
+    if parsed.port not in (None, 443):
+        raise ValueError("SOURCE_IMAGE_URL_PORT_FORBIDDEN")
     host = parsed.hostname.lower().rstrip(".")
     if host in {"localhost", "localhost.localdomain"} or host.endswith(".local"):
         raise ValueError("SOURCE_IMAGE_URL_PRIVATE_HOST_FORBIDDEN")
     try:
-        ip = ipaddress.ip_address(host)
+        literal = ipaddress.ip_address(host)
     except ValueError:
-        ip = None
-    if ip and (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast):
+        literal = None
+    if literal and _is_forbidden_ip(literal):
+        raise ValueError("SOURCE_IMAGE_URL_PRIVATE_HOST_FORBIDDEN")
+    try:
+        resolved = {
+            ipaddress.ip_address(row[4][0])
+            for row in socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+        }
+    except Exception as exc:
+        raise ValueError("SOURCE_IMAGE_URL_RESOLUTION_FAILED") from exc
+    if not resolved or any(_is_forbidden_ip(ip) for ip in resolved):
         raise ValueError("SOURCE_IMAGE_URL_PRIVATE_HOST_FORBIDDEN")
     return raw
+
+
+class _SafeRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _validate_https_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 def _fetch_source_image(url: str) -> bytes:
@@ -67,7 +98,9 @@ def _fetch_source_image(url: str) -> bytes:
         },
         method="GET",
     )
-    with urlopen(req, timeout=30) as response:
+    opener = build_opener(_SafeRedirectHandler())
+    with opener.open(req, timeout=30) as response:
+        _validate_https_url(response.geturl())
         content_type = str(response.headers.get("Content-Type") or "").split(";", 1)[0].lower()
         if not content_type.startswith("image/"):
             raise ValueError("SOURCE_IMAGE_CONTENT_TYPE_INVALID")
