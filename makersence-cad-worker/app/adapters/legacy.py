@@ -21,7 +21,9 @@ class LegacyAdapter(CadAdapter):
     id='LEGACY'
 
     def build(self,contract:dict[str,Any],context:dict[str,Any])->AdapterResult:
-        fam=str(contract.get('family') or context.get('classification') or 'silhouette_plate')
+        fam=str(contract.get('family') or context.get('classification') or '').strip()
+        if not fam:
+            raise AdapterError('LEGACY_CAD requires an explicit legacy family; silhouette_plate default is disabled')
         if fam in {'silhouette_plate','rounded_plate','keychain_plate','nfc_keychain'}:
             return self._plate(contract,context,fam)
         if fam in {'open_box','container'}: return self._open_box(contract)
@@ -45,7 +47,7 @@ class LegacyAdapter(CadAdapter):
         # Non-physical vector layers become shallow embossed solids when rectangular bounds are supplied.
         for p in svg.get('parts') or []:
             if p.get('role') in {'emboss','player_ui'} and p.get('id')!='BODY':
-                # conservative accent block; exact vector processing is handled by the legacy Worker until parity migration is complete.
+                # Conservative compatibility geometry is available only through explicit LEGACY_CAD routing.
                 aw=min(w*.4,24);ah=min(h*.25,10);eh=max(.2,num(p.get('height_mm'),.5))
                 shape=cq.Workplane('XY').box(aw,ah,eh,centered=(True,True,False)).translate((0,0,t)).val()
                 parts.append(Part(str(p.get('id') or 'ACCENT'),str(p.get('role') or 'emboss'),shape,str(p.get('color') or '#f1efe8'),False,True))
