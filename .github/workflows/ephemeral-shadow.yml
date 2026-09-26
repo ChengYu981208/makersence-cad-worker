@@ -30,7 +30,7 @@ jobs:
           - name: heavy
             context: makersence-cad-worker/runtime/heavy
             image: makersence-shadow-heavy
-            expected_version: 2.60.0-generic-blender-profile
+            expected_version: 2.61.0-design-model-router
             expect_multiview: "false"
             expect_generic_blender: "true"
           - name: cad-core-v5
@@ -421,6 +421,44 @@ jobs:
           if (failed or {}).get("status")!="failed" or "GENERIC_BLENDER_APPEARANCE_PROFILE_NOT_READY" not in msg:
               raise SystemExit("generic blender missing-profile did not fail closed: "+repr(failed))
           print(json.dumps({"status":"PASS","job_id":jid,"checks":checks,"artifact_sizes":sizes,"blender":v.get("blender_hybrid"),"missing_profile_error":msg},ensure_ascii=False))
+          PY
+
+      - name: Design model provider must fail closed when unconfigured
+        if: matrix.expect_generic_blender == 'true'
+        run: |
+          python - <<'PY'
+          import json,urllib.request,urllib.error
+          base="http://127.0.0.1:18000";token="ephemeral-shadow-token"
+          health=json.load(urllib.request.urlopen(base+"/health",timeout=5))
+          caps=set(health.get("capabilities") or [])
+          if "design_model_provider_router_v1" not in caps or "modal_triposg_provider_v1" not in caps:
+              raise SystemExit("design model capabilities missing: "+repr(sorted(caps)))
+          status=health.get("design_model_provider") or {}
+          modal=((status.get("providers") or {}).get("modal_triposg") or {})
+          if modal.get("configured") is not False or status.get("fail_closed") is not True:
+              raise SystemExit("unexpected design model provider status: "+json.dumps(status,ensure_ascii=False))
+          payload={
+            "provider":"modal_triposg",
+            "mode":"image_to_3d",
+            "source_image_url":"https://example.com/reference.png",
+            "prompt":"neutral product concept",
+            "target_faces":5000,
+            "output_format":"glb"
+          }
+          req=urllib.request.Request(
+              base+"/v1/design-model/generate",
+              data=json.dumps(payload).encode(),
+              headers={"Authorization":"Bearer "+token,"Content-Type":"application/json"},
+              method="POST")
+          try:
+              urllib.request.urlopen(req,timeout=10)
+              raise SystemExit("unconfigured modal_triposg provider unexpectedly succeeded")
+          except urllib.error.HTTPError as e:
+              body=json.loads(e.read().decode("utf-8"))
+              msg=str(body.get("error") or "")
+              if e.code!=422 or "DESIGN_MODEL_PROVIDER_NOT_CONFIGURED:modal_triposg" not in msg:
+                  raise SystemExit("wrong fail-closed response: "+str(e.code)+" "+repr(body))
+          print(json.dumps({"status":"PASS","provider_status":status},ensure_ascii=False))
           PY
 
       - name: Unknown family must fail closed
