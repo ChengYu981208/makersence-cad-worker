@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import os
+import re
+import shutil
+import subprocess
 import tempfile
+import hashlib
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +29,82 @@ except Exception:
     get_wrapper=None
 
 
+def _inkscape_bin()->str|None:
+    return shutil.which(os.getenv('INKSCAPE_BIN','inkscape'))
+
+
+def _inkscape_version()->str|None:
+    exe=_inkscape_bin()
+    if not exe:return None
+    try:
+        out=subprocess.run([exe,'--version'],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=10,check=False).stdout.decode('utf-8','replace').strip()
+        m=re.search(r'Inkscape\s+([^\s]+)',out,re.I)
+        return m.group(1) if m else (out[:120] or 'available')
+    except Exception:
+        return None
+
+
+def _svg_tag_counts(root:ET.Element)->dict[str,int]:
+    counts={}
+    for el in root.iter():
+        tag=str(el.tag).rsplit('}',1)[-1].lower()
+        counts[tag]=counts.get(tag,0)+1
+    return counts
+
+
+def normalize_svg_bytes(data:bytes, *, reject_raster:bool=True, max_bytes:int=2_000_000)->dict[str,Any]:
+    exe=_inkscape_bin()
+    if not exe:
+        return {'status':'UNAVAILABLE','available':False,'engine':'Inkscape CLI'}
+    if not isinstance(data,(bytes,bytearray)) or not data or len(data)>max_bytes:
+        return {'status':'FAIL','available':True,'error':'invalid SVG size','max_bytes':max_bytes}
+    try:
+        root=ET.fromstring(bytes(data))
+    except Exception as e:
+        return {'status':'FAIL','available':True,'error':'SVG XML parse failed: '+str(e)[:300]}
+    before=_svg_tag_counts(root)
+    if reject_raster and before.get('image',0)>0:
+        return {
+            'status':'FAIL','available':True,'engine':'Inkscape CLI','engine_version':_inkscape_version(),
+            'error':'RASTER_IMAGE_FORBIDDEN','input_tag_counts':before,
+            'policy':'Raster <image> content is rejected; do not convert a low-quality bitmap trace into dense jagged vector nodes.'
+        }
+    fd1,n1=tempfile.mkstemp(prefix='makersence-svg-in-',suffix='.svg');os.close(fd1)
+    fd2,n2=tempfile.mkstemp(prefix='makersence-svg-out-',suffix='.svg');os.close(fd2)
+    p1,p2=Path(n1),Path(n2)
+    try:
+        p1.write_bytes(bytes(data))
+        cmd=[exe,str(p1),'--export-text-to-path','--export-plain-svg','--export-filename='+str(p2)]
+        proc=subprocess.run(cmd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=45,check=False)
+        log=proc.stdout.decode('utf-8','replace')[-5000:]
+        if proc.returncode!=0 or not p2.exists() or p2.stat().st_size<32:
+            return {'status':'FAIL','available':True,'engine':'Inkscape CLI','engine_version':_inkscape_version(),'returncode':proc.returncode,'log_tail':log}
+        out=p2.read_bytes()
+        root2=ET.fromstring(out);after=_svg_tag_counts(root2)
+        raster_count=after.get('image',0)
+        text_count=after.get('text',0)+after.get('flowroot',0)
+        if reject_raster and raster_count:
+            return {'status':'FAIL','available':True,'engine':'Inkscape CLI','engine_version':_inkscape_version(),'error':'RASTER_SURVIVED_NORMALIZATION','output_tag_counts':after}
+        if text_count:
+            return {'status':'FAIL','available':True,'engine':'Inkscape CLI','engine_version':_inkscape_version(),'error':'TEXT_NOT_CONVERTED_TO_PATH','output_tag_counts':after}
+        return {
+            'status':'PASS','available':True,'engine':'Inkscape CLI','engine_version':_inkscape_version(),
+            'input_bytes':len(data),'output_bytes':len(out),
+            'input_sha256':hashlib.sha256(bytes(data)).hexdigest(),'output_sha256':hashlib.sha256(out).hexdigest(),
+            'input_tag_counts':before,'output_tag_counts':after,
+            'normalized_svg':out.decode('utf-8','replace'),
+            'policy':'Plain SVG normalization only. Closure, self-intersection, minimum 0.8 mm feature width, spacing and CAD extrusion remain separate geometry gates.'
+        }
+    except subprocess.TimeoutExpired:
+        return {'status':'FAIL','available':True,'engine':'Inkscape CLI','engine_version':_inkscape_version(),'error':'INKSCAPE_TIMEOUT'}
+    except Exception as e:
+        return {'status':'FAIL','available':True,'engine':'Inkscape CLI','engine_version':_inkscape_version(),'error':str(e)[:800]}
+    finally:
+        for p in (p1,p2):
+            try:p.unlink()
+            except Exception:pass
+
+
 def tooling_status()->dict[str,Any]:
     manifold_version=getattr(manifold3d,'__version__',None) if manifold3d else None
     lib3mf_version=None
@@ -44,6 +125,12 @@ def tooling_status()->dict[str,Any]:
             'version':lib3mf_version,
             'role':'standards-level 3MF read/write validation',
             'bambu_project_compatibility':'separate_validation_required'
+        },
+        'inkscape':{
+            'available':_inkscape_bin() is not None,
+            'version':_inkscape_version(),
+            'role':'headless SVG normalization and text-to-path conversion',
+            'policy':'reject raster image content; geometry quality and 0.8 mm gates remain separate'
         }
     }
 
@@ -83,6 +170,20 @@ def manifold_probe(mesh:trimesh.Trimesh)->dict[str,Any]:
 def validate_3mf_file(path:Path)->dict[str,Any]:
     if get_wrapper is None:
         return {'status':'UNAVAILABLE','available':False}
+    try:
+        svg=b'''<svg xmlns="http://www.w3.org/2000/svg" width="40mm" height="20mm" viewBox="0 0 40 20"><rect x="1" y="1" width="38" height="18" rx="3"/><text x="6" y="13" font-size="7">MS</text></svg>'''
+        norm=normalize_svg_bytes(svg)
+        checks['inkscape_svg_normalize']=norm.get('status')=='PASS' and norm.get('output_tag_counts',{}).get('text',0)==0 and norm.get('output_tag_counts',{}).get('image',0)==0
+        evidence['inkscape_svg_normalize']={k:v for k,v in norm.items() if k!='normalized_svg'}
+        bad=b'''<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><image href="data:image/png;base64,AA==" width="10" height="10"/></svg>'''
+        rejected=normalize_svg_bytes(bad)
+        checks['inkscape_reject_raster']=rejected.get('status')=='FAIL' and rejected.get('error')=='RASTER_IMAGE_FORBIDDEN'
+        evidence['inkscape_reject_raster']=rejected
+    except Exception as e:
+        checks['inkscape_svg_normalize']=False
+        checks['inkscape_reject_raster']=False
+        evidence['inkscape_svg_normalize']={'error':str(e)}
+
     try:
         wrapper=get_wrapper()
         model=wrapper.CreateModel()
