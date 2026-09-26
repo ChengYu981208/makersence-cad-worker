@@ -3828,6 +3828,11 @@ class Handler(BaseHTTPRequestHandler):
     def send_json(self,code,obj):
         data=json.dumps(obj,ensure_ascii=False).encode("utf-8")
         self.send_response(code);self.send_header("Content-Type","application/json; charset=utf-8");self.send_header("Content-Length",str(len(data)));self.end_headers();self.wfile.write(data)
+    def send_binary(self,code,data,content_type,headers=None):
+        self.send_response(code);self.send_header("Content-Type",content_type);self.send_header("Content-Length",str(len(data)))
+        for k,v in (headers or {}).items():
+            if v is not None:self.send_header(str(k),str(v))
+        self.end_headers();self.wfile.write(data)
     def authorized(self):
         if not TOKEN:self.send_json(503,{"error":"WORKER_TOKEN missing"});return False
         if self.headers.get("Authorization")!="Bearer "+TOKEN:self.send_json(401,{"error":"unauthorized"});return False
@@ -3906,7 +3911,13 @@ class Handler(BaseHTTPRequestHandler):
                 data=self.rfile.read(n);out=submit_slice(data,self.headers.get("X-Idempotency-Key"));return self.send_json(202,out)
             if path=="/v1/design-model/generate":
                 if n<=0 or n>200_000:return self.send_json(400,{"error":"invalid design model request"})
-                req=json.loads(self.rfile.read(n).decode("utf-8"));out=route_design_model(req);return self.send_json(200,out)
+                req=json.loads(self.rfile.read(n).decode("utf-8"));out=route_design_model(req)
+                return self.send_binary(200,out["artifact_bytes"],out["content_type"],{
+                    "X-MakerSence-Contract-Version":out["contract_version"],
+                    "X-MakerSence-Provider":out["provider"],
+                    "X-MakerSence-Provider-Version":out.get("provider_version"),
+                    "X-MakerSence-Artifact-Sha256":out["artifact_sha256"],
+                })
             if path!="/v1/generate":return self.send_json(404,{"error":"not found"})
             if n<=0 or n>4_000_000:return self.send_json(400,{"error":"invalid body"})
             req=json.loads(self.rfile.read(n).decode("utf-8"));out=generate(req);return self.send_json(200,out)
