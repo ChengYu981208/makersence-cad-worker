@@ -530,7 +530,14 @@ class H(BaseHTTPRequestHandler):
                 self.send_header("X-MakerSence-Provider","modal_triposg")
                 if provider_version:self.send_header("X-MakerSence-Provider-Version",provider_version)
                 self.end_headers();self.wfile.write(data);return
-            except Exception as e:return self.json(502,{"error":str(e)})
+            except Exception as e:
+                safe=str(e)
+                if len(safe)>240:safe=safe[:240]
+                print("MAKERSENCE_MODAL_PROXY_ERROR",json.dumps({
+                  "type":type(e).__name__,
+                  "error":safe
+                },ensure_ascii=False,sort_keys=True),flush=True)
+                return self.json(502,{"error":safe})
         if not self.auth():return self.json(401,{"error":"unauthorized"})
         if p!="/v1/slice":return self.json(404,{"error":"not found"})
         n=int(self.headers.get("Content-Length") or 0)
