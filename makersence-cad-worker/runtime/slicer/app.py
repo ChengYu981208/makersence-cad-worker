@@ -1,9 +1,14 @@
 import os, json, time, uuid, pathlib, threading, subprocess, zipfile, re, hashlib, shutil, ctypes.util
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
+from urllib.request import Request, build_opener, HTTPRedirectHandler
+from urllib.error import HTTPError, URLError
 
 PORT=int(os.environ.get("PORT","8080"))
 TOKEN=os.environ.get("SLICER_TOKEN","")
+PRIVATE_DOMAIN=os.environ.get("RAILWAY_PRIVATE_DOMAIN","").strip().lower()
+MODAL_SHARED_TOKEN=os.environ.get("MAKERSENCE_MODAL_SHARED_TOKEN","").strip()
+MODAL_TRIPOSG_ENDPOINT=os.environ.get("MODAL_TRIPOSG_ENDPOINT","https://zhbettychien--makersence-triposg-api.modal.run/generate").strip()
 BAMBU_BIN=os.environ.get("BAMBU_BIN","")
 BAMBU_VERSION=os.environ.get("BAMBU_VERSION","2.8.2.61")
 DISPLAY_MODE=os.environ.get("BAMBU_DISPLAY_MODE","hybrid_wayland")
@@ -396,6 +401,62 @@ def submit(data,key=None):
     threading.Thread(target=run_job,args=(jid,inp,out,sd),daemon=True).start()
     return {"job_id":jid,"status":"processing"}
 
+
+class _PreservePostRedirect(HTTPRedirectHandler):
+    def redirect_request(self,req,fp,code,msg,headers,newurl):
+        if code in (301,302,303,307,308):
+            return Request(newurl,data=req.data,headers=dict(req.headers),method="POST")
+        return super().redirect_request(req,fp,code,msg,headers,newurl)
+
+def triposg_proxy(payload):
+    if not MODAL_SHARED_TOKEN:raise ValueError("modal shared token unavailable")
+    if not isinstance(payload,dict):raise ValueError("invalid json body")
+    provider=str(payload.get("provider") or "modal_triposg")
+    mode=str(payload.get("mode") or "image_to_3d")
+    source=str(payload.get("source_image_url") or "").strip()
+    output=str(payload.get("output_format") or "glb").lower()
+    try:faces=int(payload.get("target_faces") or 4000)
+    except Exception:raise ValueError("invalid target_faces")
+    if provider!="modal_triposg":raise ValueError("unsupported provider")
+    if mode!="image_to_3d":raise ValueError("unsupported mode")
+    if not re.match(r"^https://",source,re.I):raise ValueError("https source_image_url required")
+    if output!="glb":raise ValueError("glb output required")
+    if faces<1000 or faces>100000:raise ValueError("target_faces out of range")
+    body=json.dumps({
+      "contract_version":"makersence-design-model-v1",
+      "provider":"modal_triposg",
+      "mode":"image_to_3d",
+      "source_image_url":source,
+      "prompt":str(payload.get("prompt") or ""),
+      "target_faces":faces,
+      "output_format":"glb"
+    },ensure_ascii=False,separators=(",",":")).encode("utf-8")
+    req=Request(MODAL_TRIPOSG_ENDPOINT,data=body,headers={
+      "Authorization":"Bearer "+MODAL_SHARED_TOKEN,
+      "Content-Type":"application/json",
+      "Accept":"model/gltf-binary",
+      "User-Agent":"MakerSence-v3-PrivateProxy/1"
+    },method="POST")
+    opener=build_opener(_PreservePostRedirect())
+    try:
+        with opener.open(req,timeout=600) as res:
+            status=int(getattr(res,"status",200) or 200)
+            ctype=str(res.headers.get("Content-Type") or "").split(";",1)[0].strip().lower()
+            provider_version=str(res.headers.get("X-MakerSence-Provider-Version") or "").strip()
+            claimed=str(res.headers.get("X-MakerSence-Artifact-Sha256") or "").strip().lower()
+            data=res.read(64_000_001)
+    except HTTPError as e:
+        raise ValueError("modal HTTP "+str(e.code))
+    except (URLError,TimeoutError) as e:
+        raise ValueError("modal unreachable")
+    if status<200 or status>=300:raise ValueError("modal status "+str(status))
+    if len(data)<20 or len(data)>64_000_000 or data[:4]!=b"glTF":raise ValueError("invalid GLB")
+    if ctype not in ("model/gltf-binary","application/octet-stream"):raise ValueError("invalid content type")
+    sha=hashlib.sha256(data).hexdigest()
+    if claimed and claimed!=sha:raise ValueError("GLB sha256 mismatch")
+    return data,sha,provider_version
+
+
 class H(BaseHTTPRequestHandler):
     server_version="MakerSenceSlicer/1.1.11"
     def log_message(self,fmt,*args):print(fmt%args,flush=True)
@@ -404,6 +465,9 @@ class H(BaseHTTPRequestHandler):
     def auth(self):
         if not TOKEN:return False
         return self.headers.get("Authorization")=="Bearer "+TOKEN
+    def private_request(self):
+        host=str(self.headers.get("Host") or "").split(":",1)[0].strip().lower()
+        return bool(PRIVATE_DOMAIN and host==PRIVATE_DOMAIN)
     def do_GET(self):
         p=urlparse(self.path).path
         if p=="/health":
@@ -428,6 +492,21 @@ class H(BaseHTTPRequestHandler):
         return self.json(404,{"error":"not found"})
     def do_POST(self):
         p=urlparse(self.path).path
+        if p=="/v1/design-model/generate":
+            if not self.private_request():return self.json(403,{"error":"private network only"})
+            n=int(self.headers.get("Content-Length") or 0)
+            if n<=0 or n>131072:return self.json(400,{"error":"invalid json size"})
+            try:
+                payload=json.loads(self.rfile.read(n).decode("utf-8"))
+                data,sha,provider_version=triposg_proxy(payload)
+                self.send_response(200)
+                self.send_header("Content-Type","model/gltf-binary")
+                self.send_header("Content-Length",str(len(data)))
+                self.send_header("X-MakerSence-Artifact-Sha256",sha)
+                self.send_header("X-MakerSence-Provider","modal_triposg")
+                if provider_version:self.send_header("X-MakerSence-Provider-Version",provider_version)
+                self.end_headers();self.wfile.write(data);return
+            except Exception as e:return self.json(502,{"error":str(e)})
         if not self.auth():return self.json(401,{"error":"unauthorized"})
         if p!="/v1/slice":return self.json(404,{"error":"not found"})
         n=int(self.headers.get("Content-Length") or 0)
