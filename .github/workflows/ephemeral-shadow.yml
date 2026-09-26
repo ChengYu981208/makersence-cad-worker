@@ -29,13 +29,15 @@ jobs:
           - name: heavy
             context: makersence-cad-worker/runtime/heavy
             image: makersence-shadow-heavy
-            expected_version: 2.59.0-08mm-typography
+            expected_version: 2.60.0-generic-blender-profile
             expect_multiview: "false"
+            expect_generic_blender: "true"
           - name: cad-core-v5
             context: makersence-cad-worker/runtime/cad-core-v5
             image: makersence-shadow-cad-core-v5
             expected_version: 2.13.0-08mm-typography
             expect_multiview: "true"
+            expect_generic_blender: "false"
 
     steps:
       - uses: actions/checkout@v4
@@ -222,6 +224,96 @@ jobs:
                   raise SystemExit("artifact empty: "+name)
               sizes[name]=len(data)
           print(json.dumps({"status":"PASS","job_id":jid,"execution_mode":job.get("execution_mode"),"core":core,"artifact_sizes":sizes,"validation_status":v.get("status")},ensure_ascii=False))
+          PY
+
+      - name: Generic Blender profile real job
+        if: matrix.expect_generic_blender == 'true'
+        run: |
+          python - <<'PY'
+          import json,time,urllib.request
+          base="http://127.0.0.1:18000";token="ephemeral-shadow-token"
+          payload={
+            "module":"ephemeral_generic_blender",
+            "module_version":"generic-blender-shadow-v1",
+            "printer_profile":"bambu_a1_mini_04",
+            "idempotency_key":"ephemeral-generic-blender-v1",
+            "appearance_hash":"generic-blender-shadow-appearance-v1",
+            "appearance_lock":{"appearance_hash":"generic-blender-shadow-appearance-v1"},
+            "cad_contract":{
+              "family":"generic_blender_profile",
+              "adapter":"HYBRID_APPEARANCE_CAD",
+              "product_dimensions_mm":[60,44,4],
+              "wall_mm":2.4,
+              "body_color":"#6d7480",
+              "appearance_policy":{"allowed_signature_ids":[]},
+              "appearance_profile":{
+                "version":"generic-appearance-profile-v1",
+                "status":"READY",
+                "source":"synthetic_non_product_shadow_fixture",
+                "control_points_norm":[[-0.50,0.00],[-0.36,0.33],[-0.05,0.50],[0.34,0.38],[0.50,0.05],[0.30,-0.38],[-0.08,-0.50],[-0.42,-0.30]],
+                "edge_softening_mm":0.8,
+                "signature_bindings":[]
+              },
+              "holes":[{"name":"NEUTRAL_THROUGH_HOLE","x_mm":-12,"y_mm":0,"diameter_mm":5,"through":true}],
+              "pockets":[],
+              "expected_parts":[{"name":"BODY","role":"main_body","physical_separate":true,"editable_separate":true}]
+            },
+            "parameters":{"manufacturing_profile":{"printer_profile":"bambu_a1_mini_04","build_volume_mm":[180,180,180],"nozzle_mm":0.4,"max_colors":4,"min_feature_mm":0.8,"min_text_stroke_mm":0.8,"text_line_width_mm":0.42,"text_cjk_gap_mm":0.8,"text_cjk_internal_gap_mm":0.8,"text_latin_gap_mm":0.8,"wall_generator":"arachne","xy_clearance_mm":0.25,"gradient":false}}
+          }
+          req=urllib.request.Request(base+"/v1/generate",data=json.dumps(payload).encode(),headers={"Authorization":"Bearer "+token,"Content-Type":"application/json"},method="POST")
+          with urllib.request.urlopen(req,timeout=10) as r:submitted=json.load(r)
+          jid=submitted["job_id"];job=None
+          for _ in range(180):
+              q=urllib.request.Request(base+"/v1/jobs/"+jid,headers={"Authorization":"Bearer "+token})
+              with urllib.request.urlopen(q,timeout=5) as r:job=json.load(r)
+              if job.get("status") in ("completed","failed"):break
+              time.sleep(1)
+          if not job or job.get("status")!="completed":
+              raise SystemExit("generic blender job failed: "+json.dumps(job,ensure_ascii=False))
+          v=job.get("validation") or {};names={str(a.get("name") or "") for a in job.get("artifacts") or []}
+          checks={
+            "blender_hybrid_ok":v.get("blender_hybrid_ok") is True,
+            "appearance_scope_ok":v.get("appearance_scope_ok") is True,
+            "brep_valid":v.get("brep_valid") is True,
+            "watertight":v.get("watertight") is True,
+            "open_edges_zero":int(v.get("open_edges") or 0)==0,
+            "exported_open_edges_zero":int(v.get("exported_3mf_open_edges") or 0)==0,
+            "preview_matches_export":v.get("preview_matches_export") is True,
+            "step_present":"model.step" in names,
+            "three_mf_present":"model.3mf" in names,
+            "glb_present":"preview.glb" in names,
+            "blend_present":"source.blend" in names
+          }
+          bad=[k for k,x in checks.items() if not x]
+          if bad:raise SystemExit("generic blender validation failed: "+",".join(bad)+"\n"+json.dumps(v,ensure_ascii=False))
+          by={str(a.get("name") or ""):a for a in job.get("artifacts") or []}
+          sizes={}
+          for name in ("model.step","model.3mf","preview.glb","source.blend","product_render_main.png"):
+              q=urllib.request.Request(base+by[name]["url"],headers={"Authorization":"Bearer "+token})
+              with urllib.request.urlopen(q,timeout=15) as r:data=r.read()
+              if len(data)<32:raise SystemExit("empty generic blender artifact: "+name)
+              sizes[name]=len(data)
+          # Missing appearance profile must fail closed instead of inventing a shape.
+          bad_payload={
+            "module":"ephemeral_generic_blender_missing_profile",
+            "idempotency_key":"ephemeral-generic-blender-missing-v1",
+            "appearance_hash":"missing-profile",
+            "appearance_lock":{"appearance_hash":"missing-profile"},
+            "cad_contract":{"family":"generic_blender_profile","product_dimensions_mm":[60,44,4]},
+            "parameters":{"manufacturing_profile":{"printer_profile":"bambu_a1_mini_04","build_volume_mm":[180,180,180],"nozzle_mm":0.4,"max_colors":4,"min_feature_mm":0.8}}
+          }
+          q=urllib.request.Request(base+"/v1/generate",data=json.dumps(bad_payload).encode(),headers={"Authorization":"Bearer "+token,"Content-Type":"application/json"},method="POST")
+          with urllib.request.urlopen(q,timeout=10) as r:bsub=json.load(r)
+          bj=bsub["job_id"];failed=None
+          for _ in range(60):
+              q=urllib.request.Request(base+"/v1/jobs/"+bj,headers={"Authorization":"Bearer "+token})
+              with urllib.request.urlopen(q,timeout=5) as r:failed=json.load(r)
+              if failed.get("status") in ("completed","failed"):break
+              time.sleep(.5)
+          msg=str((failed or {}).get("error") or ((failed or {}).get("validation") or {}).get("geometry_error") or "")
+          if (failed or {}).get("status")!="failed" or "GENERIC_BLENDER_APPEARANCE_PROFILE_NOT_READY" not in msg:
+              raise SystemExit("generic blender missing-profile did not fail closed: "+repr(failed))
+          print(json.dumps({"status":"PASS","job_id":jid,"checks":checks,"artifact_sizes":sizes,"blender":v.get("blender_hybrid"),"missing_profile_error":msg},ensure_ascii=False))
           PY
 
       - name: Unknown family must fail closed
