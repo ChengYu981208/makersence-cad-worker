@@ -4046,10 +4046,84 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as ex:
             print("worker POST failed:",path,repr(ex),flush=True);return self.send_json(422,{"error":str(ex)})
 
+
+def _startup_hybrid_smoke():
+    if str(os.environ.get("MAKERSENCE_HYBRID_SMOKE_ON_START","")).strip()!="1":
+        return
+    smoke_id="startup-hybrid-smoke"
+    jid="smoke-"+uuid.uuid4().hex[:12]
+    folder=ROOT/jid
+    folder.mkdir(parents=True,exist_ok=True)
+    req={
+      "module":"hybrid_smoke_test",
+      "module_version":"1",
+      "idempotency_key":smoke_id,
+      "appearance_hash":"hybrid-smoke-v1",
+      "appearance_lock":{"appearance_hash":"hybrid-smoke-v1"},
+      "printer_profile":"bambu_a1_mini_04",
+      "cad_contract":{
+        "family":"design_model_hybrid",
+        "functional_family":"decorative_sculpture",
+        "product_dimensions_mm":[60.0,60.0,60.0],
+        "wall_mm":2.4,
+        "bottom_mm":2.4,
+        "body_color":"#808080",
+        "appearance_policy":{"allowed_signature_ids":[]},
+        "design_model":{
+          "provider":"modal_triposg",
+          "source_image_url":"https://raw.githubusercontent.com/VAST-AI-Research/TripoSG/fc5c40990181e2a756c4e0b1c2f4d6b5202faf8c/assets/example_data/qwvfsd.png",
+          "target_faces":2000,
+          "output_format":"glb",
+          "concept_approved":True
+        }
+      }
+    }
+    JOBS[jid]={"status":"processing","stage":"startup_smoke","idempotency_key":smoke_id,"artifacts":[],"created_at":time.time(),"updated_at":time.time(),"appearance_hash":req["appearance_hash"],"execution_mode":"startup_internal_smoke"}
+    print("MAKERSENCE_HYBRID_SMOKE_START",json.dumps({"job_id":jid,"provider":"modal_triposg","target_faces":2000},sort_keys=True),flush=True)
+    try:
+        _run_generate_job_inner(jid,req,folder)
+        j=dict(JOBS.get(jid) or {})
+        validation=j.get("validation") or {}
+        artifacts=[str(x.get("name") or "") for x in (j.get("artifacts") or [])]
+        needed={"model.stl","model.step","model.3mf","preview.glb"}
+        provider_ev=(validation.get("blender_hybrid") or {})
+        export_audit=validation.get("export_audit") or {}
+        smoke_ok=bool(
+          j.get("status")=="completed"
+          and needed.issubset(set(artifacts))
+          and validation.get("blender_hybrid_ok") is True
+          and str(provider_ev.get("mesh_brep_status") or "").lower()=="ready"
+          and export_audit.get("ok") is True
+        )
+        result={
+          "status":"PASS" if smoke_ok else "FAIL",
+          "job_status":j.get("status"),
+          "job_id":jid,
+          "stage":j.get("stage"),
+          "duration_ms":j.get("duration_ms"),
+          "artifacts":artifacts,
+          "validation_status":validation.get("status"),
+          "blender_hybrid_ok":validation.get("blender_hybrid_ok"),
+          "appearance_scope_ok":validation.get("appearance_scope_ok"),
+          "commercial_visual_ok":validation.get("commercial_visual_ok"),
+          "export_audit_ok":export_audit.get("ok"),
+          "mesh_brep_status":provider_ev.get("mesh_brep_status"),
+          "mesh_vertex_count":provider_ev.get("mesh_vertex_count"),
+          "mesh_triangle_count":provider_ev.get("mesh_triangle_count"),
+          "provider":provider_ev.get("provider"),
+          "provider_version":provider_ev.get("provider_version"),
+          "error":j.get("error")
+        }
+        print("MAKERSENCE_HYBRID_SMOKE_RESULT",json.dumps(result,ensure_ascii=False,sort_keys=True),flush=True)
+    except Exception as ex:
+        print("MAKERSENCE_HYBRID_SMOKE_RESULT",json.dumps({"status":"FAIL","job_id":jid,"error":str(ex)},ensure_ascii=False,sort_keys=True),flush=True)
+
 if __name__=="__main__":
     if len(sys.argv)>=4 and sys.argv[1]=="--generate-child":
         raise SystemExit(_generate_child_cli(sys.argv[2],sys.argv[3]))
     if len(sys.argv)>=4 and sys.argv[1]=="--motion-child":
         raise SystemExit(_motion_child_cli(sys.argv[2],sys.argv[3]))
     print("MakerSence CAD Worker 2.61.0-design-model-router starting on",PORT,"Bambu Studio",BAMBU_VERSION,"available",bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),flush=True)
+    if str(os.environ.get("MAKERSENCE_HYBRID_SMOKE_ON_START","")).strip()=="1":
+        threading.Thread(target=_startup_hybrid_smoke,daemon=True,name="makersence-hybrid-smoke").start()
     ThreadingHTTPServer(("0.0.0.0",PORT),Handler).serve_forever()
