@@ -10,7 +10,7 @@ PRIVATE_DOMAIN=os.environ.get("RAILWAY_PRIVATE_DOMAIN","").strip().lower()
 MODAL_SHARED_TOKEN=os.environ.get("MAKERSENCE_MODAL_SHARED_TOKEN","").strip()
 MODAL_TOKEN_ID=os.environ.get("MODAL_TOKEN_ID","").strip()
 MODAL_TOKEN_SECRET=os.environ.get("MODAL_TOKEN_SECRET","").strip()
-MODAL_TRIPOSG_ENDPOINT=os.environ.get("MODAL_TRIPOSG_ENDPOINT","https://zhbettychien--makersence-triposg-api.modal.run/generate").strip()
+MODAL_TRIPOSG_ENDPOINT=(os.environ.get("MODAL_TRIPOSG_ENDPOINT") or "https://zhbettychien--makersence-triposg-api.modal.run/generate").strip()
 
 def modal_credential_status():
     return {
