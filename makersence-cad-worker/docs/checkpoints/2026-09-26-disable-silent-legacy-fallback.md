@@ -60,3 +60,53 @@ Do not discard or accept that v2 patch blindly. Its exact before/after fields co
 4. Require Railway preDeploy pytest to pass.
 5. Recheck /health and engineering adapter behavior.
 6. Continue audit for remaining product-specific or silent fallback routes only after this checkpoint is live.
+
+
+## Update — CI and shadow validation complete
+
+GitHub CI infrastructure was corrected by adding a repository-root workflow:
+- commit 60d24bd94fa13c9fb41633aa2b485ca7c724336b — root worker-tests workflow
+- pytest result: 8 passed, 1 warning
+
+Full ephemeral runtime shadow was re-triggered at:
+- commit b63aea78452a87c161b71f84513445d9117a87aa
+
+Validation result: ALL GREEN
+- Shadow engineering tooling: SUCCESS
+  - engineering image build
+  - health/tooling selftest
+  - Manifold/lib3mf/Inkscape path
+  - SVG normalize real request
+- Shadow heavy: SUCCESS
+  - health/capability gate
+  - Universal CAD real job
+  - Generic Blender profile real job
+  - unknown family fail-closed
+- Shadow cad-core-v5: SUCCESS
+  - health/capability gate
+  - Universal CAD real job
+  - generated 3MF/STEP/GLB path
+  - isolated Bambu Studio real slicing
+  - unknown family fail-closed
+
+## Railway cleanup
+
+The stale environment patch was inspected before action.
+- cad-worker-v2 staged content was only source.commitSha=null.
+- accidental cad-worker-v3 staged fields from this session were never applied.
+- the staged patch was discarded without deployment.
+- live v2/v3 configs remained unchanged and all services remained healthy.
+
+## Current Railway staged state
+
+A new v4-only change is staged, NOT DEPLOYED:
+- service: cad-worker-v4
+- only staged field: source.commitSha = null
+- live v4 remains pinned to 6abbf3d7e3e285f5f3241038adecff14baf512bb until deployment is explicitly accepted.
+- branch remains consolidation/runtime-snapshots-20260925
+- rootDirectory remains makersence-cad-worker
+- Dockerfile/start command/preDeploy pytest/healthcheck/variables/domain are unchanged.
+
+## Deployment gate
+
+All source tests and ephemeral runtime checks are green. The next action is an explicit production deployment acceptance for the v4-only staged commit-pin removal. Do not add other staged changes before that deploy.
