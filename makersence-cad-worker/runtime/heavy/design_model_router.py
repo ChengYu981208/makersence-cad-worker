@@ -114,7 +114,7 @@ def _modal_triposg(req):
         headers={
             "Authorization": "Bearer " + token,
             "Content-Type": "application/json",
-            "Accept": "application/json",
+            "Accept": "model/gltf-binary",
             "User-Agent": "MakerSence-Heavy/DesignModelRouter-v1",
         },
         method="POST",
@@ -126,8 +126,12 @@ def _modal_triposg(req):
 
     try:
         with urlopen(http_req, timeout=timeout) as response:
-            raw = response.read(2_000_000)
             status_code = int(getattr(response, "status", 200) or 200)
+            headers = getattr(response, "headers", {})
+            content_type = str(headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+            provider_version = str(headers.get("X-MakerSence-Provider-Version") or "").strip() or None
+            claimed_sha256 = str(headers.get("X-MakerSence-Artifact-Sha256") or "").strip().lower()
+            raw = response.read(64_000_001)
     except HTTPError as exc:
         raise DesignModelProviderError(f"DESIGN_MODEL_PROVIDER_HTTP_{int(exc.code)}") from exc
     except (URLError, TimeoutError, socket.timeout) as exc:
@@ -137,34 +141,31 @@ def _modal_triposg(req):
 
     if status_code < 200 or status_code >= 300:
         raise DesignModelProviderError(f"DESIGN_MODEL_PROVIDER_HTTP_{status_code}")
-    try:
-        out = json.loads(raw.decode("utf-8"))
-    except Exception as exc:
-        raise DesignModelProviderError("DESIGN_MODEL_PROVIDER_INVALID_JSON") from exc
-    if not isinstance(out, dict):
-        raise DesignModelProviderError("DESIGN_MODEL_PROVIDER_INVALID_RESPONSE")
+    if len(raw) < 20:
+        raise DesignModelProviderError("DESIGN_MODEL_PROVIDER_ARTIFACT_EMPTY")
+    if len(raw) > 64_000_000:
+        raise DesignModelProviderError("DESIGN_MODEL_PROVIDER_ARTIFACT_TOO_LARGE")
+    if raw[:4] != b"glTF":
+        raise DesignModelProviderError("DESIGN_MODEL_PROVIDER_GLB_MAGIC_INVALID")
+    if content_type not in {"model/gltf-binary", "application/octet-stream"}:
+        raise DesignModelProviderError("DESIGN_MODEL_PROVIDER_CONTENT_TYPE_INVALID:" + content_type)
 
-    provider_status = str(out.get("status") or "").strip().lower()
-    if provider_status not in {"ok", "success", "completed"}:
-        err = str(out.get("error") or provider_status or "unknown")
-        raise DesignModelProviderError("DESIGN_MODEL_PROVIDER_FAILED:" + err[:240])
-
-    artifact_url = _validate_https_url(out.get("artifact_url") or out.get("glb_url"), "artifact_url")
-    sha256 = str(out.get("sha256") or out.get("artifact_sha256") or "").strip().lower()
-    if sha256 and (len(sha256) != 64 or any(ch not in "0123456789abcdef" for ch in sha256)):
-        raise DesignModelProviderError("DESIGN_MODEL_PROVIDER_SHA256_INVALID")
+    actual_sha256 = __import__("hashlib").sha256(raw).hexdigest()
+    if claimed_sha256:
+        if len(claimed_sha256) != 64 or any(ch not in "0123456789abcdef" for ch in claimed_sha256):
+            raise DesignModelProviderError("DESIGN_MODEL_PROVIDER_SHA256_INVALID")
+        if claimed_sha256 != actual_sha256:
+            raise DesignModelProviderError("DESIGN_MODEL_PROVIDER_SHA256_MISMATCH")
 
     return {
         "status": "PASS",
         "contract_version": CONTRACT_VERSION,
         "provider": "modal_triposg",
-        "provider_version": str(out.get("provider_version") or out.get("model_version") or "") or None,
-        "artifact": {
-            "type": "glb",
-            "url": artifact_url,
-            "sha256": sha256 or None,
-        },
-        "metadata": out.get("metadata") if isinstance(out.get("metadata"), dict) else {},
+        "provider_version": provider_version,
+        "content_type": "model/gltf-binary",
+        "artifact_bytes": raw,
+        "artifact_bytes_count": len(raw),
+        "artifact_sha256": actual_sha256,
         "fail_closed": True,
     }
 
