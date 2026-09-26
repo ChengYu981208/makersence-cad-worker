@@ -94,3 +94,85 @@ jobs:
           modal deploy makersence-cad-worker/integrations/modal_triposg/app.py \
             --name makersence-triposg \
             --strategy rolling
+
+      - name: Smoke test health
+        shell: bash
+        env:
+          MODAL_TRIPOSG_ENDPOINT: https://zhbettychien--makersence-triposg-api.modal.run
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, os, urllib.request
+          url=os.environ["MODAL_TRIPOSG_ENDPOINT"].rstrip("/")+"/health"
+          with urllib.request.urlopen(url, timeout=120) as r:
+              body=json.load(r)
+              if r.status != 200:
+                  raise SystemExit(f"health status={r.status}")
+          required={
+              "ok": True,
+              "provider": "modal_triposg",
+              "contract_version": "makersence-design-model-v1",
+              "output_format": "glb",
+          }
+          for k,v in required.items():
+              if body.get(k) != v:
+                  raise SystemExit(f"health mismatch {k}={body.get(k)!r}")
+          print("MODAL_TRIPOSG_HEALTH_OK", json.dumps(body, sort_keys=True))
+          PY
+
+      - name: Smoke test real image to GLB
+        shell: bash
+        env:
+          MODAL_TRIPOSG_ENDPOINT: https://zhbettychien--makersence-triposg-api.modal.run
+          SOURCE_IMAGE_URL: https://raw.githubusercontent.com/VAST-AI-Research/TripoSG/fc5c40990181e2a756c4e0b1c2f4d6b5202faf8c/assets/example_data/qwvfsd.png
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib, json, os, struct, urllib.request, urllib.error
+          endpoint=os.environ["MODAL_TRIPOSG_ENDPOINT"].rstrip("/")+"/generate"
+          payload={
+              "contract_version":"makersence-design-model-v1",
+              "provider":"modal_triposg",
+              "mode":"image_to_3d",
+              "source_image_url":os.environ["SOURCE_IMAGE_URL"],
+              "target_faces":2000,
+              "output_format":"glb",
+          }
+          req=urllib.request.Request(
+              endpoint,
+              data=json.dumps(payload).encode(),
+              headers={
+                  "Content-Type":"application/json",
+                  "Authorization":"Bearer "+os.environ["MAKERSENCE_MODAL_SHARED_TOKEN"],
+              },
+              method="POST",
+          )
+          try:
+              with urllib.request.urlopen(req, timeout=900) as r:
+                  data=r.read(64_000_001)
+                  status=r.status
+                  ctype=(r.headers.get("Content-Type") or "").split(";",1)[0].lower()
+                  expected_sha=r.headers.get("X-MakerSence-Artifact-Sha256") or ""
+          except urllib.error.HTTPError as e:
+              body=e.read(4000).decode("utf-8","replace")
+              raise SystemExit(f"generate HTTP {e.code}: {body}")
+          if status != 200:
+              raise SystemExit(f"generate status={status}")
+          if ctype != "model/gltf-binary":
+              raise SystemExit(f"unexpected content-type={ctype}")
+          if len(data) < 20 or data[:4] != b"glTF":
+              raise SystemExit("invalid GLB magic/length")
+          magic, version, declared_len=struct.unpack("<4sII", data[:12])
+          if magic != b"glTF" or version != 2 or declared_len != len(data):
+              raise SystemExit(f"invalid GLB header version={version} declared={declared_len} actual={len(data)}")
+          actual_sha=hashlib.sha256(data).hexdigest()
+          if expected_sha and expected_sha != actual_sha:
+              raise SystemExit("GLB sha256 header mismatch")
+          open("/tmp/triposg-smoke.glb","wb").write(data)
+          print("MODAL_TRIPOSG_GENERATE_OK", json.dumps({
+              "bytes":len(data),
+              "sha256":actual_sha,
+              "glb_version":version,
+              "target_faces":payload["target_faces"],
+          }, sort_keys=True))
+          PY
