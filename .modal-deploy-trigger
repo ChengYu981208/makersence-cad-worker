@@ -1,2 +1,1 @@
-trigger 2026-09-26 modal triposg real-smoke
-retry-after-timeout-fix-e638edf
+trigger 2026-09-26 modal triposg force-cuda-diso
