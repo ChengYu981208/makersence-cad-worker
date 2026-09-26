@@ -1857,7 +1857,7 @@ def validate_parts(req,parts,svg_geoms,hole_tools,invalid):
     unintended_through_cut_free=all(x.get("ok") is True for x in through_intent_checks) and all((x.get("declared_through") is False and x.get("floor_mm",0)+1e-6>=x.get("required_floor_mm",min_feature)) for x in pocket_checks)
     appearance_hash_match=(req.get("appearance_lock") or {}).get("appearance_hash")==req.get("appearance_hash") and bool(req.get("appearance_hash"))
     known_support_free=svg_driven
-    support_deferred=family in ("universal_cad_recipe","primitive_recipe","generic_blender_profile")
+    support_deferred=family in ("universal_cad_recipe","primitive_recipe","generic_blender_profile","design_model_hybrid")
     support_required=not known_support_free
     island_free=feature_containment_ok
     mesh_ok=open_edges==0 and nonmanifold==0 and degenerate==0
