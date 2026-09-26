@@ -1,0 +1,67 @@
+name: Deploy Modal TripoSG
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Source branch or commit containing the TripoSG integration
+        required: true
+        default: consolidation/runtime-snapshots-20260925
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: modal-triposg-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-22.04
+    env:
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+      MAKERSENCE_MODAL_SHARED_TOKEN: ${{ secrets.MAKERSENCE_MODAL_SHARED_TOKEN }}
+    steps:
+      - name: Checkout selected source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Validate required secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$MODAL_TOKEN_ID"
+          test -n "$MODAL_TOKEN_SECRET"
+          test -n "$MAKERSENCE_MODAL_SHARED_TOKEN"
+
+      - name: Install Modal
+        run: python -m pip install "modal>=1.5,<2"
+
+      - name: Validate provider source
+        run: |
+          python -m py_compile makersence-cad-worker/integrations/modal_triposg/app.py
+          grep -F 'TRIPOSG_SOURCE_COMMIT = "fc5c40990181e2a756c4e0b1c2f4d6b5202faf8c"' makersence-cad-worker/integrations/modal_triposg/app.py
+          grep -F 'gpu="A10G"' makersence-cad-worker/integrations/modal_triposg/app.py
+
+      - name: Create or update provider shared secret
+        shell: bash
+        run: |
+          set -euo pipefail
+          modal secret create makersence-triposg-shared \
+            "MAKERSENCE_MODAL_SHARED_TOKEN=$MAKERSENCE_MODAL_SHARED_TOKEN" \
+            --force
+
+      - name: Deploy TripoSG provider
+        run: |
+          modal deploy makersence-cad-worker/integrations/modal_triposg/app.py \
+            --name makersence-triposg \
+            --strategy rolling \
+            --stream-logs
