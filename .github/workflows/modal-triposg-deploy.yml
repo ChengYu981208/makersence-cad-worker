@@ -148,7 +148,7 @@ jobs:
               method="POST",
           )
           try:
-              with urllib.request.urlopen(req, timeout=900) as r:
+              with urllib.request.urlopen(req, timeout=2100) as r:
                   data=r.read(64_000_001)
                   status=r.status
                   ctype=(r.headers.get("Content-Type") or "").split(";",1)[0].lower()
