@@ -4208,6 +4208,19 @@ def _startup_hybrid_smoke():
           and str(provider_ev.get("mesh_brep_status") or "").lower()=="ready"
           and export_audit.get("ok") is True
         )
+        failed_validation_gates=[]
+        for key,value in validation.items():
+            if value is False:
+                failed_validation_gates.append(str(key))
+            elif isinstance(value,dict):
+                if value.get("ok") is False or str(value.get("status") or "").upper()=="FAIL":
+                    failed_validation_gates.append(str(key))
+                checks=value.get("checks")
+                if isinstance(checks,dict):
+                    for check_key,check_value in checks.items():
+                        if check_value is False:
+                            failed_validation_gates.append(str(key)+"."+str(check_key))
+        failed_validation_gates=sorted(set(failed_validation_gates))
         result={
           "status":"PASS" if smoke_ok else "FAIL",
           "job_status":j.get("status"),
@@ -4216,6 +4229,7 @@ def _startup_hybrid_smoke():
           "duration_ms":j.get("duration_ms"),
           "artifacts":artifacts,
           "validation_status":validation.get("status"),
+          "failed_validation_gates":failed_validation_gates,
           "blender_hybrid_ok":validation.get("blender_hybrid_ok"),
           "appearance_scope_ok":validation.get("appearance_scope_ok"),
           "commercial_visual_ok":validation.get("commercial_visual_ok"),
