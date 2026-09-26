@@ -27,11 +27,11 @@ BAMBU_HOME=pathlib.Path("/tmp/bambu-home")
 (BAMBU_HOME/".config"/"BambuStudio").mkdir(parents=True,exist_ok=True)
 BUILD_MM=[180.0,180.0,180.0]
 MIN_FEATURE_DEFAULT=0.8
-TEXT_MIN_STROKE_DEFAULT=0.55
+TEXT_MIN_STROKE_DEFAULT=0.80
 TEXT_LINE_WIDTH_DEFAULT=0.42
-TEXT_LATIN_GAP_DEFAULT=0.50
-TEXT_CJK_GAP_DEFAULT=0.55
-TEXT_CJK_INTERNAL_GAP_DEFAULT=0.46
+TEXT_LATIN_GAP_DEFAULT=0.80
+TEXT_CJK_GAP_DEFAULT=0.80
+TEXT_CJK_INTERNAL_GAP_DEFAULT=0.80
 MAX_COLORS_DEFAULT=4
 SVG_PROFILE_FAMILIES={"svg_profile_extrusion","silhouette_plate","rounded_plate","keychain_plate","nfc_keychain"}
 HEAVY_JOB_SEMAPHORE=threading.Semaphore(max(1,int(os.environ.get("MAKERSENCE_HEAVY_CONCURRENCY","1"))))
@@ -320,14 +320,14 @@ def glyph_class(ch):
 def script_tracking(script):
     s=str(script or "latin").lower()
     if s=="cjk":return TEXT_CJK_GAP_DEFAULT
-    if s=="mixed":return .50
+    if s=="mixed":return max(TEXT_CJK_GAP_DEFAULT,TEXT_LATIN_GAP_DEFAULT)
     return TEXT_LATIN_GAP_DEFAULT
 
 def pair_tracking(base,left_cls,right_cls):
     gap=float(base)
     if left_cls=="cjk" or right_cls=="cjk":gap=max(gap,TEXT_CJK_GAP_DEFAULT)
     if left_cls=="digit" and right_cls=="digit":gap=max(gap,TEXT_LATIN_GAP_DEFAULT)
-    if left_cls=="symbol" or right_cls=="symbol":gap=max(gap,.50)
+    if left_cls=="symbol" or right_cls=="symbol":gap=max(gap,TEXT_LATIN_GAP_DEFAULT)
     return gap
 
 def safe_numeric_display_geometry(txt,size,tracking,line_width=TEXT_LINE_WIDTH_DEFAULT,min_stroke=TEXT_MIN_STROKE_DEFAULT):
@@ -582,10 +582,10 @@ def build_svg_plate(req):
         h=max(.2,f(tf.get("height_mm"),.4));x=f(tf.get("cad_x_mm"));y=f(tf.get("cad_y_mm"));z=f(tf.get("z_mm"),0)
         script=str(tf.get("script") or "latin").lower()
         # Typography is a manufacturing exception to the structural 0.8 mm floor:
-        # 0.55 mm strokes are allowed for 0.4 mm PLA text, while body/walls remain >=0.8 mm.
+        # Text is a printable geometry feature: keep the effective stroke floor at >=0.8 mm.\n        # The 0.42 mm value below is slicer extrusion line width, not permission for thinner design strokes.
         min_stroke=max(TEXT_MIN_STROKE_DEFAULT,f(tf.get("min_stroke_mm"),TEXT_MIN_STROKE_DEFAULT))
         line_width=max(.35,min(.60,f(tf.get("slicer_line_width_mm"),TEXT_LINE_WIDTH_DEFAULT)))
-        default_clear=TEXT_CJK_GAP_DEFAULT if script=="cjk" else (.50 if script=="mixed" else TEXT_LATIN_GAP_DEFAULT)
+        default_clear=TEXT_CJK_GAP_DEFAULT if script in ("cjk","mixed") else TEXT_LATIN_GAP_DEFAULT
         min_clear=max(line_width,f(tf.get("min_glyph_clearance_mm"),default_clear))
         min_internal=max(line_width,f(tf.get("min_internal_gap_mm"),TEXT_CJK_INTERNAL_GAP_DEFAULT)) if script in ("cjk","mixed") else 0.0
         tracking=max(line_width,min(.90,f(tf.get("tracking_mm"),script_tracking(script))))
@@ -593,7 +593,7 @@ def build_svg_plate(req):
         preferred_bolden=max(0.0,min(max_bolden,f(tf.get("preferred_bolden_mm"),.06)))
         candidates=tf.get("font_candidates") or [tf.get("font") or "DejaVu Sans"];requested_kind=str(tf.get("font_kind") or "bold")
         # Dense CJK starts from regular outlines. Bold is fallback only when regular
-        # cannot meet the 0.55 mm solid-stroke gate without closing internal voids.
+        # cannot meet the 0.8 mm solid-stroke gate without closing internal voids.
         kind_candidates=["regular","bold"] if script in ("cjk","mixed") else [requested_kind]
         chosen=None;errors=[]
         # Numeric UI readouts are basic geometry, not a typography stress test.
@@ -1709,7 +1709,7 @@ def write_3mf(parts,path,tol=.04,assembled=False,placements=None,plate_index=1,p
             obj_settings.append('<part id="'+str(oi)+'" subtype="normal_part"><metadata key="name" value="'+nm+'"/><metadata key="extruder" value="'+str(ci+1)+'"/><metadata key="MakerSenseRole" value="'+role+'"/><metadata key="MakerSensePhysicalSeparate" value="'+("1" if p.get("physical_separate") else "0")+'"/><metadata key="MakerSenseAssemblyTranslate" value="'+html.escape(at,quote=True)+'"/></part>')
     if not placements:obj_settings.append('</object>')
     obj_settings.append('</config>')
-    project_settings=json.dumps({"filament_colour":colors,"filament_type":["PLA"]*len(colors),"wall_generator":"arachne","min_bead_width":"40%","line_width":"0.42","outer_wall_line_width":"0.42","inner_wall_line_width":"0.45","top_surface_line_width":"0.42","detect_thin_wall":"1","MakerSense":"true","MakerSense3MF":"native_parts_v1","MakerSenseArachneMinWallWidthPercent":"40","MakerSenseTypography":"bambu_04_slicer_safe_v3","MakerSenseTextMinStroke":"0.55","MakerSenseTextCjkMinGap":"0.55","MakerSenseTextCjkInternalGap":"0.46","MakerSenseTextLatinMinGap":"0.50"},ensure_ascii=False)
+    project_settings=json.dumps({"filament_colour":colors,"filament_type":["PLA"]*len(colors),"wall_generator":"arachne","min_bead_width":"40%","line_width":"0.42","outer_wall_line_width":"0.42","inner_wall_line_width":"0.45","top_surface_line_width":"0.42","detect_thin_wall":"1","MakerSense":"true","MakerSense3MF":"native_parts_v1","MakerSenseArachneMinWallWidthPercent":"40","MakerSenseTypography":"bambu_04_slicer_safe_v4_08mm","MakerSenseTextMinStroke":"0.80","MakerSenseTextCjkMinGap":"0.80","MakerSenseTextCjkInternalGap":"0.80","MakerSenseTextLatinMinGap":"0.80"},ensure_ascii=False)
     if placements:
         plate_objects=[{"object_id":oi,"name":p.get("name"),"role":p.get("role","part"),"extruder":color_idx[color_hex(p.get("color"))]+1} for oi,p in zip(child_ids,parts)]
     else:
@@ -3657,7 +3657,7 @@ def _u_cad_evidence_binding_selftest():
     return {"status":"PASS" if all(checks.values()) else "FAIL","checks":checks,"bindings":binding_rows,"removed_volume_mm3":round(removed,3),"expected_removed_volume_mm3":round(expected,3)}
 
 class Handler(BaseHTTPRequestHandler):
-    server_version="MakerSenceCAD/2.58.0-generic-geometry-render"
+    server_version="MakerSenceCAD/2.59.0-08mm-typography"
     def log_message(self,fmt,*args):print(fmt%args,flush=True)
     def send_json(self,code,obj):
         data=json.dumps(obj,ensure_ascii=False).encode("utf-8")
@@ -3668,7 +3668,7 @@ class Handler(BaseHTTPRequestHandler):
         return True
     def do_GET(self):
         path=urlparse(self.path).path
-        if path=="/health":return self.send_json(200,{"ok":True,"service":"makersence-cad-worker","version":"2.58.0-generic-geometry-render","engine":"cadquery+svgpathtools+shapely+pillow","bambu_slicer":{"available":bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),"engine":"Bambu Studio","version":BAMBU_VERSION},"capabilities":["compact_step_brep","bambu_native_parts","detachable_parts","assembly_render","product_dimensions","open_edges_zero_gate","formal_mesh_render","artifact_reaudit","rectangular_blind_pockets","geometry_intent_gate","orphan_geometry_gate","unintended_through_cut_gate","welded_3mf_meshes","exported_3mf_topology_gate","true_font_outline_text","high_smooth_vector_mesh","multilingual_font_fallback","actual_text_stroke_gate","adaptive_cjk_regular_first","cjk_internal_clearance_gate","cjk_counter_preservation_gate","text_mesh_topology_candidate_gate","remote_3mf_stream_analyzer","remote_3mf_xml_iterparse","remote_3mf_transform_aware_bounds","remote_3mf_cad_drawing_v1","remote_3mf_reconstruction_sections_v2","auto_hole_slot_detection","blind_cavity_detection_v1","planar_face_cluster_locator_v1","cavity_bottom_face_match_v1","residual_wall_normal_distance_v1","paired_plane_thickness_v1","bounded_per_part_feature_scan_v1","auto_fillet_chamfer_candidates","auto_section_view_plan","multipart_dimension_semantics","supplementary_stl_step_analyzer","generic_memory_budget_v1","streaming_3mf_glb_export","source_3mf_glb_preview_v1","world_space_feature_center_v1","auto_text_boldening","typography_layout_bounds","script_aware_glyph_spacing","glyph_clearance_gate","text_readability_gate","bambu_04_text_profile","text_slicer_no_merge_gate","separate_structural_text_min_feature","arachne_text_project_settings","bambu_cli_real_slice","gcode_3mf_toolpath_gate","print_ready_plate_3mf","plate_part_coverage_gate","universal_cad_recipe_v2","cad_evidence_parametric_binding_v1","blind_cavity_recipe_cut_v1","planar_design_fidelity_artifact_gate_v1","universal_design_fidelity_artifact_gate_v1","section_loft_reconstruction_v1","section_loft_open_cavity_v2","multipart_relation_rebuild_v1","per_part_reconstruction_evidence_v1","planar_multiloop_extrusion_v1","planar_mesh_projection_fallback_v1","bambu_assembly_metadata_evidence_v1","assembly_pose_solver_v1","assembly_pose_solver_v3","mechanism_pose_brep_probe_v1","mechanism_motion_solver_v1","mechanism_motion_solver_v2","mechanism_motion_solver_v3","hinge_sweep_collision_gate_v1","terminal_stop_refinement_v1","latch_relative_pivot_engagement_v1","motion_bbox_prefilter_v1","motion_memory_checkpoint_v1","motion_exact_separation_prefilter_v1","motion_fail_closed_collision_v1","motion_early_direction_exit_v1","motion_isolated_subprocess_v1","motion_timeout_guard_v1","async_motion_jobs_v1","separate_part_mate_resolver_v1","planar_ring_opening_match_v1","faceted_mesh_brep_v1","complex_topology_mesh_fallback_v1","sealed_internal_cavity_mesh_fallback_v1","multipart_dimension_semantics_v2","source_intended_contact_qa_v1","same_root_assembly_guard_v1","axisymmetric_revolve_reconstruction_v1","bounded_inprocess_universal_jobs_v1","planar_prismatic_reconstruction_v1","commercial_visual_release_gate_v1","fail_closed_family_router_v1","svg_profile_extrusion_v1","formal_geometry_only_render_v1",],"profiles":["bambu_a1_mini_04"],"universal_executor_probe":{"cavity_loft_policy":UNIVERSAL_CAVITY_LOFT_POLICY,"loft_argcount":_u_loft_from_loops.__code__.co_argcount}})
+        if path=="/health":return self.send_json(200,{"ok":True,"service":"makersence-cad-worker","version":"2.59.0-08mm-typography","engine":"cadquery+svgpathtools+shapely+pillow","bambu_slicer":{"available":bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),"engine":"Bambu Studio","version":BAMBU_VERSION},"capabilities":["compact_step_brep","bambu_native_parts","detachable_parts","assembly_render","product_dimensions","open_edges_zero_gate","formal_mesh_render","artifact_reaudit","rectangular_blind_pockets","geometry_intent_gate","orphan_geometry_gate","unintended_through_cut_gate","welded_3mf_meshes","exported_3mf_topology_gate","true_font_outline_text","high_smooth_vector_mesh","multilingual_font_fallback","actual_text_stroke_gate","adaptive_cjk_regular_first","cjk_internal_clearance_gate","cjk_counter_preservation_gate","text_mesh_topology_candidate_gate","remote_3mf_stream_analyzer","remote_3mf_xml_iterparse","remote_3mf_transform_aware_bounds","remote_3mf_cad_drawing_v1","remote_3mf_reconstruction_sections_v2","auto_hole_slot_detection","blind_cavity_detection_v1","planar_face_cluster_locator_v1","cavity_bottom_face_match_v1","residual_wall_normal_distance_v1","paired_plane_thickness_v1","bounded_per_part_feature_scan_v1","auto_fillet_chamfer_candidates","auto_section_view_plan","multipart_dimension_semantics","supplementary_stl_step_analyzer","generic_memory_budget_v1","streaming_3mf_glb_export","source_3mf_glb_preview_v1","world_space_feature_center_v1","auto_text_boldening","typography_layout_bounds","script_aware_glyph_spacing","glyph_clearance_gate","text_readability_gate","bambu_04_text_profile","text_slicer_no_merge_gate","separate_structural_text_min_feature","arachne_text_project_settings","bambu_cli_real_slice","gcode_3mf_toolpath_gate","print_ready_plate_3mf","plate_part_coverage_gate","universal_cad_recipe_v2","cad_evidence_parametric_binding_v1","blind_cavity_recipe_cut_v1","planar_design_fidelity_artifact_gate_v1","universal_design_fidelity_artifact_gate_v1","section_loft_reconstruction_v1","section_loft_open_cavity_v2","multipart_relation_rebuild_v1","per_part_reconstruction_evidence_v1","planar_multiloop_extrusion_v1","planar_mesh_projection_fallback_v1","bambu_assembly_metadata_evidence_v1","assembly_pose_solver_v1","assembly_pose_solver_v3","mechanism_pose_brep_probe_v1","mechanism_motion_solver_v1","mechanism_motion_solver_v2","mechanism_motion_solver_v3","hinge_sweep_collision_gate_v1","terminal_stop_refinement_v1","latch_relative_pivot_engagement_v1","motion_bbox_prefilter_v1","motion_memory_checkpoint_v1","motion_exact_separation_prefilter_v1","motion_fail_closed_collision_v1","motion_early_direction_exit_v1","motion_isolated_subprocess_v1","motion_timeout_guard_v1","async_motion_jobs_v1","separate_part_mate_resolver_v1","planar_ring_opening_match_v1","faceted_mesh_brep_v1","complex_topology_mesh_fallback_v1","sealed_internal_cavity_mesh_fallback_v1","multipart_dimension_semantics_v2","source_intended_contact_qa_v1","same_root_assembly_guard_v1","axisymmetric_revolve_reconstruction_v1","bounded_inprocess_universal_jobs_v1","planar_prismatic_reconstruction_v1","commercial_visual_release_gate_v1","fail_closed_family_router_v1","svg_profile_extrusion_v1","formal_geometry_only_render_v1","text_08mm_baseline_v1",],"profiles":["bambu_a1_mini_04"],"universal_executor_probe":{"cavity_loft_policy":UNIVERSAL_CAVITY_LOFT_POLICY,"loft_argcount":_u_loft_from_loops.__code__.co_argcount}})
         if path=="/v1/selftest/face-evidence":
             if not self.authorized():return
             return self.send_json(200,_dw_face_evidence_selftest())
@@ -3749,5 +3749,5 @@ if __name__=="__main__":
         raise SystemExit(_generate_child_cli(sys.argv[2],sys.argv[3]))
     if len(sys.argv)>=4 and sys.argv[1]=="--motion-child":
         raise SystemExit(_motion_child_cli(sys.argv[2],sys.argv[3]))
-    print("MakerSence CAD Worker 2.58.0-generic-geometry-render starting on",PORT,"Bambu Studio",BAMBU_VERSION,"available",bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),flush=True)
+    print("MakerSence CAD Worker 2.59.0-08mm-typography starting on",PORT,"Bambu Studio",BAMBU_VERSION,"available",bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),flush=True)
     ThreadingHTTPServer(("0.0.0.0",PORT),Handler).serve_forever()
