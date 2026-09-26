@@ -1173,6 +1173,126 @@ def universal_cad_recipe(c):
     if shape_volume(shape)<=1e-3:raise ValueError("UNIVERSAL_RECIPE_ZERO_VOLUME")
     return [{"name":"BODY","role":"main_body","physical_separate":True,"editable_separate":True,"color":color_hex(c.get("body_color") or "#6d7480"),"shape":shape,"geom":None,"min_feature_mm":max(.8,f(c.get("wall_mm"),.8))}]
 
+
+DESIGN_MODEL_HYBRID_BLENDER_SCRIPT=r'''
+import bpy,bmesh,json,sys,math
+args=sys.argv[sys.argv.index("--")+1:]
+glb_path,spec_path,out_path,blend_path=args[:4]
+spec=json.load(open(spec_path,encoding="utf-8"))
+bpy.ops.object.select_all(action="SELECT");bpy.ops.object.delete(use_global=False)
+bpy.ops.import_scene.gltf(filepath=glb_path)
+objs=[o for o in bpy.context.scene.objects if o.type=="MESH"]
+if not objs:raise RuntimeError("DESIGN_MODEL_GLB_NO_MESH")
+for o in bpy.context.selected_objects:o.select_set(False)
+for o in objs:o.select_set(True)
+bpy.context.view_layer.objects.active=objs[0]
+if len(objs)>1:bpy.ops.object.join()
+obj=bpy.context.view_layer.objects.active
+bpy.ops.object.transform_apply(location=True,rotation=True,scale=True)
+max_faces=max(500,min(12000,int(spec.get("max_faces") or 6000)))
+if len(obj.data.polygons)>max_faces:
+    mod=obj.modifiers.new(name="MakerSence_Decimate",type="DECIMATE")
+    mod.ratio=max(0.02,min(1.0,max_faces/max(1,len(obj.data.polygons))))
+    bpy.context.view_layer.objects.active=obj
+    bpy.ops.object.modifier_apply(modifier=mod.name)
+bm=bmesh.new();bm.from_mesh(obj.data);bmesh.ops.triangulate(bm,faces=bm.faces[:]);bm.to_mesh(obj.data);bm.free()
+verts=[v.co.copy() for v in obj.data.vertices]
+if not verts:raise RuntimeError("DESIGN_MODEL_GLB_EMPTY_MESH")
+mn=[min(v[i] for v in verts) for i in range(3)]
+mx=[max(v[i] for v in verts) for i in range(3)]
+dims=[mx[i]-mn[i] for i in range(3)]
+if any((not math.isfinite(x) or x<=1e-8) for x in dims):raise RuntimeError("DESIGN_MODEL_GLB_ZERO_EXTENT")
+target=[float(x) for x in spec["target_dimensions_mm"]]
+scale=[target[i]/dims[i] for i in range(3)]
+for v in obj.data.vertices:
+    v.co.x=(v.co.x-mn[0])*scale[0]
+    v.co.y=(v.co.y-mn[1])*scale[1]
+    v.co.z=(v.co.z-mn[2])*scale[2]
+bpy.context.view_layer.objects.active=obj
+bpy.ops.object.transform_apply(location=True,rotation=True,scale=True)
+bm=bmesh.new();bm.from_mesh(obj.data);bmesh.ops.triangulate(bm,faces=bm.faces[:]);bm.to_mesh(obj.data);bm.free()
+vv=[[float(v.co.x),float(v.co.y),float(v.co.z)] for v in obj.data.vertices]
+tt=[[int(i) for i in p.vertices] for p in obj.data.polygons if len(p.vertices)==3]
+payload={"vertices":vv,"triangles":tt,"target_dimensions_mm":target,"vertex_count":len(vv),"triangle_count":len(tt)}
+with open(out_path,"w",encoding="utf-8") as fh:json.dump(payload,fh,separators=(",",":"))
+bpy.ops.wm.save_as_mainfile(filepath=blend_path,check_existing=False)
+'''
+
+def _hybrid_scaled_shape(shape,center,scale):
+    from OCP.gp import gp_Trsf,gp_Pnt
+    from OCP.BRepBuilderAPI import BRepBuilderAPI_Transform
+    base=shape.val()
+    tr=gp_Trsf();tr.SetScale(gp_Pnt(f(center[0]),f(center[1]),f(center[2])),f(scale))
+    out=BRepBuilderAPI_Transform(base.wrapped,tr,True).Shape()
+    cast=cq.Shape.cast(out)
+    if cast.isNull() or not cast.isValid():raise ValueError("DESIGN_MODEL_HYBRID_SCALE_INVALID")
+    return cq.Workplane("XY").newObject([cast])
+
+def _hybrid_apply_functional_core(shape,c):
+    family=str(c.get("functional_family") or "")
+    meta={"family":family,"status":"NOT_APPLIED"}
+    if family not in ("container_vessel","organizer_storage","utensil_vessel"):
+        return shape,meta
+    wall=max(.8,f(c.get("wall_mm"),2.4));bottom=max(wall,f(c.get("bottom_mm"),wall))
+    mn,mx,dims=_u_bounds(shape)
+    if min(dims[0],dims[1])<=2*wall+4 or dims[2]<=bottom+4:raise ValueError("DESIGN_MODEL_HYBRID_CONTAINER_TOO_SMALL")
+    scale=max(.55,min(.985,1.0-(2.0*wall/max(1.0,min(dims[0],dims[1])))))
+    center=[(mn[0]+mx[0])/2.0,(mn[1]+mx[1])/2.0,mn[2]]
+    rise=max(bottom,dims[2]*(1.0-scale)+1.0)
+    inner=_hybrid_scaled_shape(shape,center,scale).translate((0,0,rise))
+    before=shape_volume(shape)
+    try:cut=shape.cut(inner)
+    except Exception as ex:raise ValueError("DESIGN_MODEL_HYBRID_CONTAINER_CUT_FAILED:"+str(ex))
+    after=shape_volume(cut)
+    if after<=1e-3 or after>=before*.985:raise ValueError("DESIGN_MODEL_HYBRID_CONTAINER_CAVITY_NOT_CREATED")
+    meta={"family":family,"status":"PASS","wall_target_mm":round(wall,3),"bottom_target_mm":round(bottom,3),"inner_scale":round(scale,6),"inner_rise_mm":round(rise,3),"removed_volume_mm3":round(before-after,3)}
+    return cut,meta
+
+def design_model_hybrid(c,req):
+    dm=c.get("design_model") or {}
+    image_url=str(dm.get("source_image_url") or "")
+    if not re.match(r"^https://",image_url,re.I):raise ValueError("DESIGN_MODEL_HYBRID_IMAGE_URL_REQUIRED")
+    if dm.get("concept_approved") is not True:raise ValueError("DESIGN_MODEL_HYBRID_CONCEPT_NOT_APPROVED")
+    target=c.get("product_dimensions_mm") or []
+    if not isinstance(target,list) or len(target)!=3:raise ValueError("DESIGN_MODEL_HYBRID_TARGET_DIMENSIONS_REQUIRED")
+    target=[f(x) for x in target]
+    if any(x<=0 or x>180.0001 for x in target):raise ValueError("DESIGN_MODEL_HYBRID_TARGET_DIMENSIONS_INVALID")
+    provider=str(dm.get("provider") or "modal_triposg")
+    target_faces=max(1000,min(12000,int(f(dm.get("target_faces"),4000))))
+    routed=route_design_model({"provider":provider,"mode":"image_to_3d","source_image_url":image_url,"target_faces":target_faces,"output_format":"glb"})
+    data=routed.get("artifact_bytes") or b""
+    if len(data)<20 or data[:4]!=b"glTF":raise ValueError("DESIGN_MODEL_HYBRID_PROVIDER_GLB_INVALID")
+    folder=pathlib.Path(req.get("_job_folder") or "")
+    if not folder.is_dir():raise ValueError("DESIGN_MODEL_HYBRID_JOB_FOLDER_MISSING")
+    glb=folder/"design_model_input.glb";spec=folder/"design_model_hybrid_spec.json";mesh_json=folder/"design_model_hybrid_mesh.json";blend=folder/"source.blend";script=folder/"design_model_hybrid_blender.py"
+    glb.write_bytes(data)
+    spec.write_text(json.dumps({"target_dimensions_mm":target,"max_faces":min(12000,max(target_faces,4000))},ensure_ascii=False),encoding="utf-8")
+    script.write_text(DESIGN_MODEL_HYBRID_BLENDER_SCRIPT,encoding="utf-8")
+    run=subprocess.run([BLENDER_BIN,"--background","--factory-startup","--python",str(script),"--",str(glb),str(spec),str(mesh_json),str(blend)],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=180)
+    if run.returncode!=0 or not mesh_json.exists():raise ValueError("DESIGN_MODEL_HYBRID_BLENDER_FAILED:"+run.stdout[-1800:])
+    mesh=json.loads(mesh_json.read_text(encoding="utf-8"))
+    ev=_dw_mesh_brep_evidence(mesh,{"topology_stability":0.0,"sections":[]})
+    if not ev or str(ev.get("status") or "").lower()!="ready":raise ValueError("DESIGN_MODEL_HYBRID_MESH_BREP_UNAVAILABLE:"+str((ev or {}).get("reason") or "unknown"))
+    body=_u_faceted_mesh_brep_shape(ev)
+    body=_u_normalize_origin(body)
+    body,functional_meta=_hybrid_apply_functional_core(body,c)
+    if body.val().isNull() or not body.val().isValid() or shape_volume(body)<=1e-3:raise ValueError("DESIGN_MODEL_HYBRID_BREP_INVALID")
+    required=[str(x) for x in ((c.get("appearance_policy") or {}).get("allowed_signature_ids") or []) if str(x)]
+    evidence={
+      "status":"PASS","engine":"TripoSG+Blender+CadQuery","provider":routed.get("provider"),
+      "provider_version":routed.get("provider_version"),"provider_sha256":routed.get("artifact_sha256"),
+      "source_image_url":image_url,"concept_approved":True,"mesh_brep_status":ev.get("status"),
+      "mesh_vertex_count":ev.get("vertex_count"),"mesh_triangle_count":ev.get("triangle_count"),
+      "functional_core":functional_meta,"required_signature_ids":required,
+      "signature_bindings":[],"signature_bindings_ok":len(required)==0,
+      "note":"Appearance came from an approved concept image through the design-model provider; final semantic/theme fidelity still requires render QA."
+    }
+    req["_generic_blender_evidence"]=evidence
+    c["design_model_evidence"]={k:v for k,v in evidence.items() if k!="source_image_url"}
+    c["product_dimensions_mm"]=target
+    part={"name":"BODY","role":"main_body","physical_separate":True,"editable_separate":True,"color":color_hex(c.get("body_color") or "#6d7480"),"shape":body,"geom":None,"min_feature_mm":max(.8,f(c.get("wall_mm"),.8))}
+    return [part],[],[],[]
+
 def build_cad_family(req):
     c=req.get("cad_contract") or req.get("recipe") or {}
     family=str(c.get("family") or "").strip()
@@ -1180,6 +1300,7 @@ def build_cad_family(req):
         raise ValueError("LEGACY_SPECIALIZED_FAMILY_DISABLED_USE_UNIVERSAL_CAD_RECIPE:"+family)
     if family=="universal_cad_recipe":return universal_cad_recipe(c),[],[],[]
     if family=="generic_blender_profile":return generic_blender_profile(c,req)
+    if family=="design_model_hybrid":return design_model_hybrid(c,req)
     if family=="primitive_recipe":
         base=primitive_recipe(c)
         return [{"name":"BODY","role":"body","color":color_hex(c.get("body_color") or "#6d7480"),"shape":base,"geom":None,"min_feature_mm":c.get("wall_mm") or c.get("thickness_mm")}],[],[],[]
@@ -1660,10 +1781,11 @@ def validate_parts(req,parts,svg_geoms,hole_tools,invalid):
     assembly_pose_resolved=assembly_pose_status in ("RESOLVED","NOT_APPLICABLE")
     repair_needed=(not valid) or (not mesh_ok) or zero_volume or self_intersection or bool(collisions) or (not assembly_parts_ok) or (not part_intent_ok) or (not orphan_geometry_free) or (not unintended_through_cut_free)
 
-    blender_evidence=req.get("_generic_blender_evidence") if family=="generic_blender_profile" else None
-    blender_hybrid_ok=(blender_evidence or {}).get("status")=="PASS" if family=="generic_blender_profile" else True
-    appearance_scope_ok=(blender_evidence or {}).get("signature_bindings_ok") is True if family=="generic_blender_profile" else True
-    if family=="generic_blender_profile":
+    hybrid_family=family in ("generic_blender_profile","design_model_hybrid")
+    blender_evidence=req.get("_generic_blender_evidence") if hybrid_family else None
+    blender_hybrid_ok=(blender_evidence or {}).get("status")=="PASS" if hybrid_family else True
+    appearance_scope_ok=(blender_evidence or {}).get("signature_bindings_ok") is True if hybrid_family else True
+    if hybrid_family:
         required_sig=list((blender_evidence or {}).get("required_signature_ids") or [])
         bind_rows=list((blender_evidence or {}).get("signature_bindings") or [])
         design_fidelity_gate={"status":"PASS" if appearance_scope_ok else "FAIL","required_signature_ids":required_sig,"checks":[{"signature_id":x.get("signature_id"),"status":"PASS" if x.get("ok") else "FAIL","control_point_indices":x.get("control_point_indices")} for x in bind_rows]}
@@ -2217,7 +2339,7 @@ def _run_generate_job_inner(jid,req,folder):
         if family=="universal_cad_recipe":
             required.append("cad_dimension_constraints_ok")
             if ((validation.get("design_fidelity_gate") or {}).get("required_signature_ids") or []):required.append("design_fidelity_ok")
-        if family=="generic_blender_profile":
+        if family in ("generic_blender_profile","design_model_hybrid"):
             required.extend(["blender_hybrid_ok","appearance_scope_ok"])
             if ((validation.get("design_fidelity_gate") or {}).get("required_signature_ids") or []):required.append("design_fidelity_ok")
         pass_core=all(validation.get(k) is True for k in required)
