@@ -8,9 +8,9 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from app import jobs
 from app.assets import put_asset, get_asset
 from app.analyzers import analyze_bytes
-from app.tooling import tooling_status, integration_selftest
+from app.tooling import tooling_status, integration_selftest, normalize_svg_bytes
 
-VERSION='3.1.0-manifold-lib3mf'
+VERSION='3.2.0-inkscape-svg'
 app=FastAPI(title='MakerSence CAD Worker',version=VERSION)
 _bearer=HTTPBearer(auto_error=False)
 
@@ -24,7 +24,7 @@ def health():
     return {
         'ok':True,'service':'makersence-cad-worker','version':VERSION,'engine':'cadquery+trimesh+manifold3d+lib3mf+shapely',
         'tooling':tooling_status(),
-        'capabilities':['robust_manifold_probe_v1','lib3mf_strict_validation_v1','compact_step_brep','detachable_parts','assembly_render','product_dimensions','open_edges_zero_gate','formal_mesh_render','artifact_reaudit','source_asset_upload','source_interface_section_extraction','INTERFACE_LOCKED_CAD','INTERFACE_MECHANISM_CAD','MECHANISM_CAD','legacy_adapter_bridge'],
+        'capabilities':['robust_manifold_probe_v1','lib3mf_strict_validation_v1','inkscape_svg_normalize_v1','svg_raster_reject_v1','compact_step_brep','detachable_parts','assembly_render','product_dimensions','open_edges_zero_gate','formal_mesh_render','artifact_reaudit','source_asset_upload','source_interface_section_extraction','INTERFACE_LOCKED_CAD','INTERFACE_MECHANISM_CAD','MECHANISM_CAD','legacy_adapter_bridge'],
         'profiles':['bambu_a1_mini_04'],
         'adapters':{
             'INTERFACE_LOCKED_CAD':'ready','INTERFACE_MECHANISM_CAD':'ready','MECHANISM_CAD':'ready'
@@ -77,6 +77,13 @@ async def analyze_3mf_url(req:Request,_:bool=Depends(auth)):
     except HTTPException:raise
     except Exception as e:raise HTTPException(502,f'3MF download/analyze failed: {e}')
 
+
+@app.post('/v1/svg/normalize')
+async def svg_normalize(req:Request,_:bool=Depends(auth)):
+    data=await req.body()
+    result=normalize_svg_bytes(data,reject_raster=True)
+    code=200 if result.get('status')=='PASS' else (503 if result.get('status')=='UNAVAILABLE' else 422)
+    return JSONResponse(status_code=code,content=result)
 
 @app.get('/v1/tooling-selftest')
 def tooling_selftest(_:bool=Depends(auth)):
