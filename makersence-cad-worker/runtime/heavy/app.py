@@ -733,6 +733,148 @@ def _flute_shape(shape,width,depth,height,count=8,strength=.055):
         except Exception:pass
     return out
 
+BLENDER_BIN=os.environ.get("BLENDER_BIN","/usr/bin/blender")
+GENERIC_BLENDER_PROFILE_SCRIPT=r'''
+import bpy,json,sys,math,hashlib
+from mathutils.geometry import interpolate_bezier
+args=sys.argv[sys.argv.index("--")+1:]
+spec=json.load(open(args[0],encoding="utf-8"))
+out_path,blend_path=args[1],args[2]
+pts=spec.get("control_points_norm") or []
+if len(pts)<6:raise RuntimeError("GENERIC_BLENDER_PROFILE_NEEDS_6_POINTS")
+width=float(spec["width_mm"]);height=float(spec["height_mm"]);body_t=float(spec["body_thickness_mm"])
+bpy.ops.object.select_all(action="SELECT");bpy.ops.object.delete(use_global=False)
+curve=bpy.data.curves.new("MakerSence_Generic_Appearance_Profile","CURVE")
+curve.dimensions="2D";curve.fill_mode="BOTH";curve.resolution_u=32
+curve.extrude=max(.01,body_t/2.0)
+curve.bevel_depth=max(0.0,float(spec.get("preview_bevel_mm") or 0.0))
+curve.bevel_resolution=6
+spline=curve.splines.new("BEZIER");spline.bezier_points.add(len(pts)-1)
+for point,p in zip(spline.bezier_points,pts):
+    point.co=(float(p[0])*width,float(p[1])*height,0)
+    point.handle_left_type="AUTO";point.handle_right_type="AUTO"
+spline.use_cyclic_u=True
+obj=bpy.data.objects.new("Generic_Appearance_Profile",curve);bpy.context.collection.objects.link(obj)
+bpy.context.view_layer.update()
+sample=[]
+for i in range(len(spline.bezier_points)):
+    a=spline.bezier_points[i];b=spline.bezier_points[(i+1)%len(spline.bezier_points)]
+    seg=interpolate_bezier(a.co,a.handle_right,b.handle_left,b.co,16)
+    sample.extend((float(v.x),float(v.y)) for v in seg[:-1])
+if len(sample)<72:raise RuntimeError("GENERIC_BLENDER_PROFILE_SAMPLE_INCOMPLETE")
+xmin=min(x for x,y in sample);xmax=max(x for x,y in sample);ymin=min(y for x,y in sample);ymax=max(y for x,y in sample)
+if xmax-xmin<=1e-5 or ymax-ymin<=1e-5:raise RuntimeError("GENERIC_BLENDER_PROFILE_ZERO_EXTENT")
+sx=width/(xmax-xmin);sy=height/(ymax-ymin);cx=(xmin+xmax)/2;cy=(ymin+ymax)/2
+obj.scale=(sx,sy,1);obj.location=(-cx*sx,-cy*sy,body_t/2)
+normalized=[[round((x-cx)*sx,6),round((y-cy)*sy,6)] for x,y in sample]
+payload={
+  "status":"PASS","engine":"Blender","blender_version":bpy.app.version_string,
+  "profile_version":"generic-blender-profile-v1","curve_type":"BEZIER_AUTO",
+  "control_point_count":len(pts),"sample_count":len(normalized),
+  "outline_points_mm":normalized,"dimensions_mm":[width,height,body_t],
+  "source_profile_sha256":hashlib.sha256(json.dumps(pts,separators=(",",":")).encode()).hexdigest()
+}
+with open(out_path,"w",encoding="utf-8") as f:json.dump(payload,f)
+bpy.ops.wm.save_as_mainfile(filepath=blend_path,check_existing=False)
+'''
+
+def _generic_profile_loft(points,width,height,total_h,edge_softening):
+    if len(points)<24:raise ValueError("GENERIC_BLENDER_SAMPLED_PROFILE_TOO_SMALL")
+    inset=max(.15,min(1.2,edge_softening*.75,min(width,height)*.035))
+    edge=max(.20,min(edge_softening,total_h*.28))
+    if total_h<=2*edge+.2:edge=max(.15,total_h*.20)
+    scale=max(.90,1.0-2.0*inset/max(1.0,min(width,height)))
+    sections=[(0.0,scale),(edge,1.0),(max(edge,total_h-edge),1.0),(total_h,scale)]
+    wires=[];last_z=-1.0
+    for z,sc in sections:
+        if z<=last_z+1e-6:continue
+        p=[[f(x)*sc,f(y)*sc] for x,y in points]
+        wp=cq.Workplane("XY").workplane(offset=z).moveTo(p[0][0],p[0][1]).spline([(q[0],q[1]) for q in p[1:]],includeCurrent=True).close()
+        wire=wp.val()
+        wires.append(wire);last_z=z
+    if len(wires)<3:raise ValueError("GENERIC_BLENDER_LOFT_SECTIONS_INVALID")
+    try:
+        solid=cq.Solid.makeLoft(wires,False)
+        body=cq.Workplane("XY").newObject([solid])
+    except Exception as ex:
+        raise ValueError("GENERIC_BLENDER_CAD_LOFT_FAILED:"+str(ex))
+    if body.val().isNull() or not body.val().isValid() or shape_volume(body)<=.001:
+        raise ValueError("GENERIC_BLENDER_CAD_BREP_INVALID")
+    return body,{"edge_softening_mm":round(edge,4),"edge_inset_mm":round(inset,4),"edge_scale":round(scale,6),"section_count":len(wires)}
+
+def generic_blender_profile(c,req):
+    if not pathlib.Path(BLENDER_BIN).exists():raise ValueError("GENERIC_BLENDER_EXECUTOR_UNAVAILABLE")
+    ap=c.get("appearance_profile") or {}
+    if str(ap.get("status") or "")!="READY":raise ValueError("GENERIC_BLENDER_APPEARANCE_PROFILE_NOT_READY")
+    pts=ap.get("control_points_norm") or []
+    max_pts=resource_policy(req).get("max_curve_control_points",72)
+    if not isinstance(pts,list) or len(pts)<6 or len(pts)>max_pts:raise ValueError("GENERIC_BLENDER_CONTROL_POINT_COUNT")
+    clean=[]
+    for p in pts:
+        if not isinstance(p,(list,tuple)) or len(p)<2:raise ValueError("GENERIC_BLENDER_CONTROL_POINT_INVALID")
+        x=f(p[0],999);y=f(p[1],999)
+        if not (math.isfinite(x) and math.isfinite(y)) or abs(x)>.60 or abs(y)>.60:raise ValueError("GENERIC_BLENDER_CONTROL_POINT_RANGE")
+        clean.append([x,y])
+    raw=Polygon(clean)
+    if raw.is_empty or not raw.is_valid or raw.area<.03:raise ValueError("GENERIC_BLENDER_CONTROL_POLYGON_INVALID")
+    target=c.get("product_dimensions_mm") or ap.get("target_dimensions_mm") or []
+    if not isinstance(target,list) or len(target)!=3:raise ValueError("GENERIC_BLENDER_TARGET_DIMENSIONS_REQUIRED")
+    width,height,total_h=[f(x) for x in target]
+    if not (8<=width<=180 and 8<=height<=180 and .8<=total_h<=180):raise ValueError("GENERIC_BLENDER_TARGET_DIMENSIONS_INVALID")
+    body_t=max(.8,min(total_h,f(c.get("body_thickness_mm"),total_h)))
+    edge_soft=max(.20,min(f(ap.get("edge_softening_mm"),min(1.2,body_t*.22)),body_t*.28,min(width,height)*.06))
+    folder=pathlib.Path(req.get("_job_folder") or "")
+    if not folder.is_dir():raise ValueError("GENERIC_BLENDER_JOB_FOLDER_MISSING")
+    inp=folder/"blender_input.json";profile_path=folder/"blender_profile.json";blend_path=folder/"source.blend";script=folder/"generic_blender_profile.py"
+    inp.write_text(json.dumps({"control_points_norm":clean,"width_mm":width,"height_mm":height,"body_thickness_mm":body_t,"preview_bevel_mm":edge_soft*.45},ensure_ascii=False),encoding="utf-8")
+    script.write_text(GENERIC_BLENDER_PROFILE_SCRIPT,encoding="utf-8")
+    run=subprocess.run([BLENDER_BIN,"--background","--factory-startup","--python",str(script),"--",str(inp),str(profile_path),str(blend_path)],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=120)
+    if run.returncode!=0 or not profile_path.exists() or not blend_path.exists():raise ValueError("GENERIC_BLENDER_PROFILE_FAILED:"+run.stdout[-1600:])
+    evidence=json.loads(profile_path.read_text(encoding="utf-8"))
+    points=evidence.get("outline_points_mm") or []
+    if len(points)<72 or any(not isinstance(p,list) or len(p)!=2 for p in points):raise ValueError("GENERIC_BLENDER_PROFILE_OUTPUT_INVALID")
+    poly=Polygon(points).buffer(0)
+    if poly.geom_type!="Polygon" or poly.is_empty or not poly.is_valid:raise ValueError("GENERIC_BLENDER_PROFILE_SELF_INTERSECTION")
+    area_ratio=float(poly.area)/max(1e-9,width*height)
+    if area_ratio<.18 or area_ratio>.96:raise ValueError("GENERIC_BLENDER_PROFILE_AREA_RATIO")
+    body,loft_meta=_generic_profile_loft(points,width,height,body_t,edge_soft)
+    hole_tools=[]
+    for hd in c.get("holes") or []:
+        if not bool(hd.get("through",True)):continue
+        x=f(hd.get("x_mm"));y=f(hd.get("y_mm"));dia=f(hd.get("diameter_mm"))
+        if dia<=0:raise ValueError("GENERIC_BLENDER_HOLE_INVALID")
+        tool=cq.Workplane("XY").workplane(offset=-1).center(x,y).circle(dia/2).extrude(body_t+2)
+        body=body.cut(tool);hole_tools.append(({"id":hd.get("name") or "through_hole"},tool))
+    for pk in c.get("pockets") or []:
+        x=f(pk.get("x_mm"));y=f(pk.get("y_mm"));dia=f(pk.get("diameter_mm"),0);pw=f(pk.get("width_mm"),0);ph=f(pk.get("height_mm"),0)
+        dep=f(pk.get("depth_mm"),0);side=str(pk.get("side") or "front").lower()
+        if dep<=0 or dep>body_t-.8+1e-6:raise ValueError("GENERIC_BLENDER_POCKET_DEPTH_INVALID")
+        z0=-.05 if side=="back" else body_t-dep
+        if pw>0 and ph>0:tool=cq.Workplane("XY").workplane(offset=z0).center(x,y).rect(pw,ph).extrude(dep+.05)
+        elif dia>0:tool=cq.Workplane("XY").workplane(offset=z0).center(x,y).circle(dia/2).extrude(dep+.05)
+        else:raise ValueError("GENERIC_BLENDER_POCKET_SHAPE_INVALID")
+        body=body.cut(tool)
+    if body.val().isNull() or not body.val().isValid() or shape_volume(body)<=.001:raise ValueError("GENERIC_BLENDER_FEATURE_BOOLEAN_FAILED")
+    bindings=ap.get("signature_bindings") or []
+    allowed=set(str(x) for x in ((c.get("appearance_policy") or {}).get("allowed_signature_ids") or []) if str(x))
+    binding_checks=[]
+    for b in bindings:
+        sid=str((b or {}).get("signature_id") or "")
+        idxs=[int(x) for x in ((b or {}).get("control_point_indices") or []) if isinstance(x,(int,float)) and int(x)>=0 and int(x)<len(clean)]
+        binding_checks.append({"signature_id":sid,"control_point_indices":idxs,"ok":bool(sid and idxs and (not allowed or sid in allowed))})
+    required=sorted(allowed)
+    bound={x["signature_id"] for x in binding_checks if x["ok"]}
+    signature_ok=all(x in bound for x in required) if required else True
+    evidence.update({
+      "status":"PASS","profile_area_ratio":round(area_ratio,5),"loft":loft_meta,
+      "signature_bindings":binding_checks,"required_signature_ids":required,"signature_bindings_ok":signature_ok,
+      "formal_geometry":"CadQuery B-Rep loft rebuilt from Blender-sampled Bezier profile; functional cuts are applied in CAD."
+    })
+    req["_generic_blender_evidence"]=evidence
+    c["thickness_mm"]=body_t;c["curve_quality"]="high_blender";c["product_dimensions_mm"]=[width,height,body_t]
+    part={"name":"BODY","role":"main_body","physical_separate":True,"editable_separate":True,"color":color_hex(c.get("body_color") or "#6d7480"),"shape":body,"geom":poly,"min_feature_mm":max(.8,f(c.get("wall_mm"),.8))}
+    return [part],[],hole_tools,[]
+
 def _u_signed_area(loop):
     pts=list(loop or [])
     if len(pts)<3:return 0.0
@@ -1035,6 +1177,7 @@ def build_cad_family(req):
     if family in ("hybrid_bone_tag","static_functional_utensil_vessel","sculpted_lidded_container","open_box","phone_stand"):
         raise ValueError("LEGACY_SPECIALIZED_FAMILY_DISABLED_USE_UNIVERSAL_CAD_RECIPE:"+family)
     if family=="universal_cad_recipe":return universal_cad_recipe(c),[],[],[]
+    if family=="generic_blender_profile":return generic_blender_profile(c,req)
     if family=="primitive_recipe":
         base=primitive_recipe(c)
         return [{"name":"BODY","role":"body","color":color_hex(c.get("body_color") or "#6d7480"),"shape":base,"geom":None,"min_feature_mm":c.get("wall_mm") or c.get("thickness_mm")}],[],[],[]
@@ -1429,6 +1572,13 @@ def validate_parts(req,parts,svg_geoms,hole_tools,invalid):
     if svg_driven and len(box)==2:
         contract_svg_match=abs(f(c.get("width_mm"),box[0])-f(box[0]))<=.05 and abs(f(c.get("height_mm"),box[1])-f(box[1]))<=.05
     contract_dimensions_ok=True;expected_dimensions_mm=None;contract_measured_dimensions_mm=None
+    if family=="generic_blender_profile":
+        gd=c.get("product_dimensions_mm") or []
+        if isinstance(gd,list) and len(gd)==3 and all(f(x)>0 for x in gd):
+            expected_dimensions_mm=[f(x) for x in gd];contract_measured_dimensions_mm=list(dims)
+            tolerances=[max(.25,expected_dimensions_mm[i]*.01) for i in range(3)]
+            contract_dimensions_ok=all(abs(contract_measured_dimensions_mm[i]-expected_dimensions_mm[i])<=tolerances[i]+1e-9 for i in range(3))
+        else:contract_dimensions_ok=False
     universal_fidelity=None;design_fidelity_gate=None;design_fidelity_ok=True
     cad_dimension_constraints=list(c.get("_cad_dimension_bindings") or [])
     cad_dimension_constraints_ok=True
@@ -1476,7 +1626,7 @@ def validate_parts(req,parts,svg_geoms,hole_tools,invalid):
     unintended_through_cut_free=all(x.get("ok") is True for x in through_intent_checks) and all((x.get("declared_through") is False and x.get("floor_mm",0)+1e-6>=x.get("required_floor_mm",min_feature)) for x in pocket_checks)
     appearance_hash_match=(req.get("appearance_lock") or {}).get("appearance_hash")==req.get("appearance_hash") and bool(req.get("appearance_hash"))
     known_support_free=svg_driven
-    support_deferred=family in ("universal_cad_recipe","primitive_recipe")
+    support_deferred=family in ("universal_cad_recipe","primitive_recipe","generic_blender_profile")
     support_required=not known_support_free
     island_free=feature_containment_ok
     mesh_ok=open_edges==0 and nonmanifold==0 and degenerate==0
@@ -1508,6 +1658,14 @@ def validate_parts(req,parts,svg_geoms,hole_tools,invalid):
     assembly_pose_resolved=assembly_pose_status in ("RESOLVED","NOT_APPLICABLE")
     repair_needed=(not valid) or (not mesh_ok) or zero_volume or self_intersection or bool(collisions) or (not assembly_parts_ok) or (not part_intent_ok) or (not orphan_geometry_free) or (not unintended_through_cut_free)
 
+    blender_evidence=req.get("_generic_blender_evidence") if family=="generic_blender_profile" else None
+    blender_hybrid_ok=(blender_evidence or {}).get("status")=="PASS" if family=="generic_blender_profile" else True
+    appearance_scope_ok=(blender_evidence or {}).get("signature_bindings_ok") is True if family=="generic_blender_profile" else True
+    if family=="generic_blender_profile":
+        required_sig=list((blender_evidence or {}).get("required_signature_ids") or [])
+        bind_rows=list((blender_evidence or {}).get("signature_bindings") or [])
+        design_fidelity_gate={"status":"PASS" if appearance_scope_ok else "FAIL","required_signature_ids":required_sig,"checks":[{"signature_id":x.get("signature_id"),"status":"PASS" if x.get("ok") else "FAIL","control_point_indices":x.get("control_point_indices")} for x in bind_rows]}
+        design_fidelity_ok=appearance_scope_ok
     checks={
       "brep_valid":valid and not zero_volume,"watertight":valid and mesh_ok and not zero_volume,"open_edges":open_edges,"nonmanifold_edges":nonmanifold,"degenerate_triangles":degenerate,
       "zero_volume":zero_volume,"volume_checks":volumes,"geometry_fingerprint":fingerprint,
@@ -1527,6 +1685,7 @@ def validate_parts(req,parts,svg_geoms,hole_tools,invalid):
       "nozzle_mm":nozzle,"nozzle_profile_ok":nozzle_ok,"real_slicer_verified":False,"slice_status":"NOT_RUN",
       "contract_svg_match":contract_svg_match,"contract_dimensions_ok":contract_dimensions_ok,"expected_dimensions_mm":expected_dimensions_mm,"contract_measured_dimensions_mm":contract_measured_dimensions_mm,
       "universal_fidelity":universal_fidelity,"design_fidelity_gate":design_fidelity_gate,"design_fidelity_ok":design_fidelity_ok,
+      "blender_hybrid_ok":blender_hybrid_ok,"blender_hybrid":blender_evidence,"appearance_scope_ok":appearance_scope_ok,
       "cad_dimension_constraints_ok":cad_dimension_constraints_ok,"cad_dimension_constraints":cad_dimension_constraints,
       "appearance_hash_match":appearance_hash_match
     }
@@ -2056,12 +2215,17 @@ def _run_generate_job_inner(jid,req,folder):
         if family=="universal_cad_recipe":
             required.append("cad_dimension_constraints_ok")
             if ((validation.get("design_fidelity_gate") or {}).get("required_signature_ids") or []):required.append("design_fidelity_ok")
+        if family=="generic_blender_profile":
+            required.extend(["blender_hybrid_ok","appearance_scope_ok"])
+            if ((validation.get("design_fidelity_gate") or {}).get("required_signature_ids") or []):required.append("design_fidelity_ok")
         pass_core=all(validation.get(k) is True for k in required)
         pass_neg=validation.get("self_intersection") is False and validation.get("part_overlap") is False and validation.get("assembly_interference") is False and validation.get("repair_needed") is False and validation.get("zero_volume") is False and validation.get("open_edges")==0 and validation.get("nonmanifold_edges")==0 and validation.get("degenerate_triangles")==0
         validation["status"]="PASS" if pass_core and pass_neg else "FAIL"
         manifest={"module":req.get("module"),"module_version":req.get("module_version"),"appearance_hash":req.get("appearance_hash"),"appearance_lock":req.get("appearance_lock"),"svg_artifact":req.get("svg_artifact"),"cad_contract":req.get("cad_contract"),"printer_profile":req.get("printer_profile","bambu_a1_mini_04"),"validation":validation,"parts":[{"name":p["name"],"role":p["role"],"color":p["color"]} for p in parts],"artifacts":artifacts}
         (folder/"manifest.json").write_text(json.dumps(manifest,ensure_ascii=False,indent=2),encoding="utf-8")
         artifacts.append({"type":"json","name":"manifest.json","url":"/v1/artifacts/"+jid+"/manifest.json"})
+        if family=="generic_blender_profile" and (folder/"source.blend").exists():
+            artifacts.append({"type":"blend","name":"source.blend","url":"/v1/artifacts/"+jid+"/source.blend"})
         JOBS[jid].update({"status":"completed","stage":"completed","artifacts":artifacts,"validation":validation,"appearance_hash":req.get("appearance_hash"),"duration_ms":int((time.time()-started)*1000),"updated_at":time.time()})
     except Exception as ex:
         msg=str(ex);is_self=msg.startswith("SVG_SELF_INTERSECTION:")
@@ -3657,7 +3821,7 @@ def _u_cad_evidence_binding_selftest():
     return {"status":"PASS" if all(checks.values()) else "FAIL","checks":checks,"bindings":binding_rows,"removed_volume_mm3":round(removed,3),"expected_removed_volume_mm3":round(expected,3)}
 
 class Handler(BaseHTTPRequestHandler):
-    server_version="MakerSenceCAD/2.59.0-08mm-typography"
+    server_version="MakerSenceCAD/2.60.0-generic-blender-profile"
     def log_message(self,fmt,*args):print(fmt%args,flush=True)
     def send_json(self,code,obj):
         data=json.dumps(obj,ensure_ascii=False).encode("utf-8")
@@ -3668,7 +3832,7 @@ class Handler(BaseHTTPRequestHandler):
         return True
     def do_GET(self):
         path=urlparse(self.path).path
-        if path=="/health":return self.send_json(200,{"ok":True,"service":"makersence-cad-worker","version":"2.59.0-08mm-typography","engine":"cadquery+svgpathtools+shapely+pillow","bambu_slicer":{"available":bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),"engine":"Bambu Studio","version":BAMBU_VERSION},"capabilities":["compact_step_brep","bambu_native_parts","detachable_parts","assembly_render","product_dimensions","open_edges_zero_gate","formal_mesh_render","artifact_reaudit","rectangular_blind_pockets","geometry_intent_gate","orphan_geometry_gate","unintended_through_cut_gate","welded_3mf_meshes","exported_3mf_topology_gate","true_font_outline_text","high_smooth_vector_mesh","multilingual_font_fallback","actual_text_stroke_gate","adaptive_cjk_regular_first","cjk_internal_clearance_gate","cjk_counter_preservation_gate","text_mesh_topology_candidate_gate","remote_3mf_stream_analyzer","remote_3mf_xml_iterparse","remote_3mf_transform_aware_bounds","remote_3mf_cad_drawing_v1","remote_3mf_reconstruction_sections_v2","auto_hole_slot_detection","blind_cavity_detection_v1","planar_face_cluster_locator_v1","cavity_bottom_face_match_v1","residual_wall_normal_distance_v1","paired_plane_thickness_v1","bounded_per_part_feature_scan_v1","auto_fillet_chamfer_candidates","auto_section_view_plan","multipart_dimension_semantics","supplementary_stl_step_analyzer","generic_memory_budget_v1","streaming_3mf_glb_export","source_3mf_glb_preview_v1","world_space_feature_center_v1","auto_text_boldening","typography_layout_bounds","script_aware_glyph_spacing","glyph_clearance_gate","text_readability_gate","bambu_04_text_profile","text_slicer_no_merge_gate","separate_structural_text_min_feature","arachne_text_project_settings","bambu_cli_real_slice","gcode_3mf_toolpath_gate","print_ready_plate_3mf","plate_part_coverage_gate","universal_cad_recipe_v2","cad_evidence_parametric_binding_v1","blind_cavity_recipe_cut_v1","planar_design_fidelity_artifact_gate_v1","universal_design_fidelity_artifact_gate_v1","section_loft_reconstruction_v1","section_loft_open_cavity_v2","multipart_relation_rebuild_v1","per_part_reconstruction_evidence_v1","planar_multiloop_extrusion_v1","planar_mesh_projection_fallback_v1","bambu_assembly_metadata_evidence_v1","assembly_pose_solver_v1","assembly_pose_solver_v3","mechanism_pose_brep_probe_v1","mechanism_motion_solver_v1","mechanism_motion_solver_v2","mechanism_motion_solver_v3","hinge_sweep_collision_gate_v1","terminal_stop_refinement_v1","latch_relative_pivot_engagement_v1","motion_bbox_prefilter_v1","motion_memory_checkpoint_v1","motion_exact_separation_prefilter_v1","motion_fail_closed_collision_v1","motion_early_direction_exit_v1","motion_isolated_subprocess_v1","motion_timeout_guard_v1","async_motion_jobs_v1","separate_part_mate_resolver_v1","planar_ring_opening_match_v1","faceted_mesh_brep_v1","complex_topology_mesh_fallback_v1","sealed_internal_cavity_mesh_fallback_v1","multipart_dimension_semantics_v2","source_intended_contact_qa_v1","same_root_assembly_guard_v1","axisymmetric_revolve_reconstruction_v1","bounded_inprocess_universal_jobs_v1","planar_prismatic_reconstruction_v1","commercial_visual_release_gate_v1","fail_closed_family_router_v1","svg_profile_extrusion_v1","formal_geometry_only_render_v1","text_08mm_baseline_v1",],"profiles":["bambu_a1_mini_04"],"universal_executor_probe":{"cavity_loft_policy":UNIVERSAL_CAVITY_LOFT_POLICY,"loft_argcount":_u_loft_from_loops.__code__.co_argcount}})
+        if path=="/health":return self.send_json(200,{"ok":True,"service":"makersence-cad-worker","version":"2.60.0-generic-blender-profile","engine":"cadquery+blender+svgpathtools+shapely+pillow","blender":{"available":pathlib.Path(BLENDER_BIN).exists(),"binary":BLENDER_BIN},"bambu_slicer":{"available":bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),"engine":"Bambu Studio","version":BAMBU_VERSION},"capabilities":["compact_step_brep","bambu_native_parts","detachable_parts","assembly_render","product_dimensions","open_edges_zero_gate","formal_mesh_render","artifact_reaudit","rectangular_blind_pockets","geometry_intent_gate","orphan_geometry_gate","unintended_through_cut_gate","welded_3mf_meshes","exported_3mf_topology_gate","true_font_outline_text","high_smooth_vector_mesh","multilingual_font_fallback","actual_text_stroke_gate","adaptive_cjk_regular_first","cjk_internal_clearance_gate","cjk_counter_preservation_gate","text_mesh_topology_candidate_gate","remote_3mf_stream_analyzer","remote_3mf_xml_iterparse","remote_3mf_transform_aware_bounds","remote_3mf_cad_drawing_v1","remote_3mf_reconstruction_sections_v2","auto_hole_slot_detection","blind_cavity_detection_v1","planar_face_cluster_locator_v1","cavity_bottom_face_match_v1","residual_wall_normal_distance_v1","paired_plane_thickness_v1","bounded_per_part_feature_scan_v1","auto_fillet_chamfer_candidates","auto_section_view_plan","multipart_dimension_semantics","supplementary_stl_step_analyzer","generic_memory_budget_v1","streaming_3mf_glb_export","source_3mf_glb_preview_v1","world_space_feature_center_v1","auto_text_boldening","typography_layout_bounds","script_aware_glyph_spacing","glyph_clearance_gate","text_readability_gate","bambu_04_text_profile","text_slicer_no_merge_gate","separate_structural_text_min_feature","arachne_text_project_settings","bambu_cli_real_slice","gcode_3mf_toolpath_gate","print_ready_plate_3mf","plate_part_coverage_gate","universal_cad_recipe_v2","cad_evidence_parametric_binding_v1","blind_cavity_recipe_cut_v1","planar_design_fidelity_artifact_gate_v1","universal_design_fidelity_artifact_gate_v1","section_loft_reconstruction_v1","section_loft_open_cavity_v2","multipart_relation_rebuild_v1","per_part_reconstruction_evidence_v1","planar_multiloop_extrusion_v1","planar_mesh_projection_fallback_v1","bambu_assembly_metadata_evidence_v1","assembly_pose_solver_v1","assembly_pose_solver_v3","mechanism_pose_brep_probe_v1","mechanism_motion_solver_v1","mechanism_motion_solver_v2","mechanism_motion_solver_v3","hinge_sweep_collision_gate_v1","terminal_stop_refinement_v1","latch_relative_pivot_engagement_v1","motion_bbox_prefilter_v1","motion_memory_checkpoint_v1","motion_exact_separation_prefilter_v1","motion_fail_closed_collision_v1","motion_early_direction_exit_v1","motion_isolated_subprocess_v1","motion_timeout_guard_v1","async_motion_jobs_v1","separate_part_mate_resolver_v1","planar_ring_opening_match_v1","faceted_mesh_brep_v1","complex_topology_mesh_fallback_v1","sealed_internal_cavity_mesh_fallback_v1","multipart_dimension_semantics_v2","source_intended_contact_qa_v1","same_root_assembly_guard_v1","axisymmetric_revolve_reconstruction_v1","bounded_inprocess_universal_jobs_v1","planar_prismatic_reconstruction_v1","commercial_visual_release_gate_v1","fail_closed_family_router_v1","svg_profile_extrusion_v1","formal_geometry_only_render_v1","text_08mm_baseline_v1","generic_blender_profile_executor_v1","generic_blender_to_cad_brep_v1",],"profiles":["bambu_a1_mini_04"],"universal_executor_probe":{"cavity_loft_policy":UNIVERSAL_CAVITY_LOFT_POLICY,"loft_argcount":_u_loft_from_loops.__code__.co_argcount}})
         if path=="/v1/selftest/face-evidence":
             if not self.authorized():return
             return self.send_json(200,_dw_face_evidence_selftest())
@@ -3700,12 +3864,12 @@ class Handler(BaseHTTPRequestHandler):
             if not self.authorized():return
             parts=path.strip("/").split("/")
             if len(parts)!=4:return self.send_json(404,{"error":"not found"})
-            _,_,jid,name=parts;allowed={"model.stl","model.step","model.3mf","preview.glb","source_preview.glb","product_render_main.png","manifest.json"}
+            _,_,jid,name=parts;allowed={"model.stl","model.step","model.3mf","preview.glb","source_preview.glb","product_render_main.png","manifest.json","source.blend"}
             plate_file=bool(re.fullmatch(r"print_plate_\d+\.3mf",name))
             if name not in allowed and not plate_file:return self.send_json(404,{"error":"not found"})
             p=ROOT/jid/name
             if not p.exists():return self.send_json(404,{"error":"not found"})
-            typ="model/3mf" if plate_file else {"model.stl":"model/stl","model.step":"application/step","model.3mf":"model/3mf","preview.glb":"model/gltf-binary","source_preview.glb":"model/gltf-binary","product_render_main.png":"image/png","manifest.json":"application/json"}.get(name,"application/octet-stream")
+            typ="model/3mf" if plate_file else {"model.stl":"model/stl","model.step":"application/step","model.3mf":"model/3mf","preview.glb":"model/gltf-binary","source_preview.glb":"model/gltf-binary","product_render_main.png":"image/png","manifest.json":"application/json","source.blend":"application/x-blender"}.get(name,"application/octet-stream")
             data=p.read_bytes();self.send_response(200);self.send_header("Content-Type",typ);self.send_header("Content-Length",str(len(data)));self.send_header("Content-Disposition",'attachment; filename="'+name+'"');self.end_headers();self.wfile.write(data);return
         self.send_json(404,{"error":"not found"})
     def do_POST(self):
@@ -3749,5 +3913,5 @@ if __name__=="__main__":
         raise SystemExit(_generate_child_cli(sys.argv[2],sys.argv[3]))
     if len(sys.argv)>=4 and sys.argv[1]=="--motion-child":
         raise SystemExit(_motion_child_cli(sys.argv[2],sys.argv[3]))
-    print("MakerSence CAD Worker 2.59.0-08mm-typography starting on",PORT,"Bambu Studio",BAMBU_VERSION,"available",bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),flush=True)
+    print("MakerSence CAD Worker 2.60.0-generic-blender-profile starting on",PORT,"Bambu Studio",BAMBU_VERSION,"available",bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),flush=True)
     ThreadingHTTPServer(("0.0.0.0",PORT),Handler).serve_forever()
