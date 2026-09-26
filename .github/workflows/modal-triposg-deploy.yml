@@ -20,9 +20,7 @@ jobs:
   deploy:
     runs-on: ubuntu-22.04
     env:
-      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
-      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
-      MAKERSENCE_MODAL_SHARED_TOKEN: ${{ secrets.MAKERSENCE_MODAL_SHARED_TOKEN }}
+      MODAL_TOKEN_SET_COMMAND: ${{ secrets.MODAL_TOKEN_SET_COMMAND }}
     steps:
       - name: Checkout selected source
         uses: actions/checkout@v4
@@ -34,13 +32,40 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Validate required secrets
+      - name: Parse Modal credentials and derive provider token
         shell: bash
         run: |
           set -euo pipefail
-          test -n "$MODAL_TOKEN_ID"
-          test -n "$MODAL_TOKEN_SECRET"
-          test -n "$MAKERSENCE_MODAL_SHARED_TOKEN"
+          test -n "$MODAL_TOKEN_SET_COMMAND"
+          python - <<'PY'
+          import base64, hashlib, hmac, os, shlex
+          parts=shlex.split(os.environ["MODAL_TOKEN_SET_COMMAND"])
+          def arg(name):
+              for i,p in enumerate(parts):
+                  if p==name and i+1<len(parts):
+                      return parts[i+1]
+                  if p.startswith(name+"="):
+                      return p.split("=",1)[1]
+              raise SystemExit("missing "+name)
+          token_id=arg("--token-id")
+          token_secret=arg("--token-secret")
+          if not token_id.startswith("ak-") or not token_secret.startswith("as-"):
+              raise SystemExit("invalid Modal API token format")
+          shared=base64.urlsafe_b64encode(
+              hmac.new(
+                  token_secret.encode(),
+                  ("makersence-modal-shared-v1:"+token_id).encode(),
+                  hashlib.sha256,
+              ).digest()
+          ).decode().rstrip("=")
+          print("::add-mask::"+token_id)
+          print("::add-mask::"+token_secret)
+          print("::add-mask::"+shared)
+          with open(os.environ["GITHUB_ENV"],"a",encoding="utf-8") as fh:
+              fh.write("MODAL_TOKEN_ID="+token_id+"\n")
+              fh.write("MODAL_TOKEN_SECRET="+token_secret+"\n")
+              fh.write("MAKERSENCE_MODAL_SHARED_TOKEN="+shared+"\n")
+          PY
 
       - name: Install Modal
         run: python -m pip install "modal>=1.5,<2"
@@ -63,5 +88,4 @@ jobs:
         run: |
           modal deploy makersence-cad-worker/integrations/modal_triposg/app.py \
             --name makersence-triposg \
-            --strategy rolling \
-            --stream-logs
+            --strategy rolling
