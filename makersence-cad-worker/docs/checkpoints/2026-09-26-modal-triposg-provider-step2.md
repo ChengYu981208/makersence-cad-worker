@@ -137,3 +137,20 @@ No token value should be committed, pasted into source, or logged.
    - MODAL_TRIPOSG_TOKEN
 8. Run Shadow again.
 9. Only after all gates pass consider production routing.
+
+
+## Deployment control prepared
+
+A manual-only deployment workflow was added to the default branch `main`:
+- file: .github/workflows/modal-triposg-deploy.yml
+- commit: e499c0db70d33bf1ee30eb04d313efcdebb94c13
+- trigger: workflow_dispatch only
+- default source_ref: consolidation/runtime-snapshots-20260925
+- it does not run on push and does not modify Railway
+
+Required GitHub repository secrets before running it:
+- MODAL_TOKEN_ID
+- MODAL_TOKEN_SECRET
+- MAKERSENCE_MODAL_SHARED_TOKEN
+
+The workflow checks out the selected source ref, validates the pinned TripoSG source/GPU declaration, creates or updates the Modal shared secret, then runs `modal deploy` with a rolling strategy.
