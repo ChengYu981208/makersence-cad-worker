@@ -256,7 +256,7 @@ jobs:
               },
               "holes":[{"name":"NEUTRAL_THROUGH_HOLE","x_mm":-12,"y_mm":0,"diameter_mm":5,"through":True}],
               "pockets":[],
-              "expected_parts":[{"name":"BODY","role":"main_body","physical_separate":true,"editable_separate":true}]
+              "expected_parts":[{"name":"BODY","role":"main_body","physical_separate":True,"editable_separate":True}]
             },
             "parameters":{"manufacturing_profile":{"printer_profile":"bambu_a1_mini_04","build_volume_mm":[180,180,180],"nozzle_mm":0.4,"max_colors":4,"min_feature_mm":0.8,"min_text_stroke_mm":0.8,"text_line_width_mm":0.42,"text_cjk_gap_mm":0.8,"text_cjk_internal_gap_mm":0.8,"text_latin_gap_mm":0.8,"wall_generator":"arachne","xy_clearance_mm":0.25,"gradient":False}}
           }
