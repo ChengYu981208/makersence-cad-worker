@@ -223,7 +223,113 @@ jobs:
               if len(data)<32:
                   raise SystemExit("artifact empty: "+name)
               sizes[name]=len(data)
+              if expected_multi and name=="model.3mf":
+                  if not data.startswith(b"PK"):
+                      raise SystemExit("CAD Core model.3mf is not ZIP-based")
+                  with open("/tmp/makersence-shadow-cad-core.3mf","wb") as f:
+                      f.write(data)
           print(json.dumps({"status":"PASS","job_id":jid,"execution_mode":job.get("execution_mode"),"core":core,"artifact_sizes":sizes,"validation_status":v.get("status")},ensure_ascii=False))
+          PY
+
+      - name: Slice CAD Core output with isolated Bambu Studio
+        if: matrix.expect_multiview == 'true'
+        run: |
+          test -s /tmp/makersence-shadow-cad-core.3mf
+          docker build --pull -t makersence-shadow-slicer makersence-cad-worker/runtime/slicer
+          docker run -d --name makersence-shadow-slicer \
+            -e SLICER_TOKEN=ephemeral-shadow-token \
+            -e PORT=8080 \
+            -e BAMBU_VERSION=2.8.2.61 \
+            -e BAMBU_DISPLAY_MODE=x11_flatpak \
+            -p 18002:8080 \
+            makersence-shadow-slicer
+          python - <<'PY'
+          import hashlib, io, json, os, re, time, urllib.request, zipfile
+          base="http://127.0.0.1:18002"
+          token="ephemeral-shadow-token"
+          health=None
+          last_error=None
+          for _ in range(600):
+              try:
+                  with urllib.request.urlopen(base+"/health",timeout=3) as r:
+                      health=json.load(r)
+                  if health.get("ok"):
+                      break
+              except Exception as e:
+                  last_error=str(e)
+              time.sleep(1)
+          if not health or not health.get("ok"):
+              raise SystemExit("isolated slicer health failed: "+repr(last_error or health))
+          if health.get("version")!="1.1.11" or health.get("engine_version")!="2.8.2.61":
+              raise SystemExit("slicer version mismatch: "+json.dumps(health,ensure_ascii=False))
+          for key in ("bambu_available","display_ready","x11_ready","osmesa_available"):
+              if health.get(key) is not True:
+                  raise SystemExit("slicer runtime gate failed: "+key+" "+json.dumps(health,ensure_ascii=False))
+          model_path="/tmp/makersence-shadow-cad-core.3mf"
+          model=open(model_path,"rb").read()
+          if len(model)<128 or not model.startswith(b"PK"):
+              raise SystemExit("generated CAD Core 3MF is empty or invalid ZIP")
+          headers={"Authorization":"Bearer "+token,"Content-Type":"model/3mf","X-Idempotency-Key":"cad-core-shadow-bambu-"+os.environ.get("GITHUB_RUN_ID","local")+"-"+os.environ.get("GITHUB_RUN_ATTEMPT","1")}
+          req=urllib.request.Request(base+"/v1/slice",data=model,headers=headers,method="POST")
+          with urllib.request.urlopen(req,timeout=30) as r:
+              submitted=json.load(r)
+          jid=submitted.get("job_id")
+          if not jid:
+              raise SystemExit("slicer did not return job_id: "+json.dumps(submitted,ensure_ascii=False))
+          job=None
+          poll_headers={"Authorization":"Bearer "+token}
+          for _ in range(360):
+              q=urllib.request.Request(base+"/v1/slice-jobs/"+jid,headers=poll_headers)
+              with urllib.request.urlopen(q,timeout=20) as r:
+                  job=json.load(r)
+              if job.get("status") in ("completed","failed"):
+                  break
+              time.sleep(1)
+          if not job or job.get("status")!="completed":
+              summary={"status":(job or {}).get("status"),"error":(job or {}).get("error"),"validation":(job or {}).get("validation"),"log_tail":str((job or {}).get("log_tail") or "")[-3000:]}
+              raise SystemExit("real Bambu slice failed: "+json.dumps(summary,ensure_ascii=False))
+          v=job.get("validation") or {}
+          checks={
+            "completed":job.get("status")=="completed",
+            "validation_pass":v.get("status")=="PASS",
+            "real_slicer_verified":v.get("real_slicer_verified") is True,
+            "toolpath_checked":v.get("toolpath_checked") is True,
+            "deterministic_toolpath_package":v.get("deterministic_toolpath_package") is True,
+            "engine":v.get("engine")=="Bambu Studio",
+            "engine_version":v.get("engine_version")=="2.8.2.61",
+            "zip_ok":v.get("zip_ok") is True,
+            "gcode_entries":bool(v.get("gcode_entries")),
+            "gcode_bytes":int(v.get("gcode_bytes") or 0)>1000,
+            "layer_markers":int(v.get("layer_markers") or 0)>0,
+            "completion_marker":v.get("completion_marker") is True,
+            "sliced_3mf_bytes":int(v.get("output_3mf_bytes") or 0)>128,
+          }
+          missing=[k for k,ok in checks.items() if not ok]
+          if missing:
+              raise SystemExit("Bambu slice validation failed: "+",".join(missing)+" "+json.dumps(v,ensure_ascii=False))
+          artifact_path=job.get("artifact")
+          if not artifact_path:
+              raise SystemExit("slicer returned no sliced 3MF artifact URL")
+          artifact_url=artifact_path if artifact_path.startswith("http") else base+artifact_path
+          q=urllib.request.Request(artifact_url,headers=poll_headers)
+          with urllib.request.urlopen(q,timeout=60) as r:
+              sliced=r.read()
+          if len(sliced)<128 or not sliced.startswith(b"PK"):
+              raise SystemExit("downloaded sliced 3MF is empty or invalid ZIP")
+          with zipfile.ZipFile(io.BytesIO(sliced),"r") as z:
+              if z.testzip() is not None:
+                  raise SystemExit("downloaded sliced 3MF ZIP integrity check failed")
+              entries=[n for n in z.namelist() if n.lower().endswith(".gcode") or ".gcode." in n.lower()]
+              gcode_blobs=[z.read(n) for n in entries[:8]]
+          marker_count=0
+          completion=False
+          for blob in gcode_blobs:
+              gcode=blob.decode("utf-8","ignore")
+              marker_count+=len(re.findall(r"(?:^|\n)(?:;\s*CHANGE_LAYER|;LAYER_CHANGE|; layer num/|;LAYER:)",gcode,re.I))
+              completion=completion or bool(re.search(r"(?:M73\s+P100\s+R0|;\s*EXECUTABLE_BLOCK_END)",gcode,re.I))
+          if not entries or sum(map(len,gcode_blobs))<=1000 or marker_count<=0 or not completion:
+              raise SystemExit("downloaded sliced 3MF lacks complete toolpath evidence: "+json.dumps({"entries":entries,"gcode_bytes":sum(map(len,gcode_blobs)),"layer_markers":marker_count,"completion_marker":completion},ensure_ascii=False))
+          print(json.dumps({"status":"PASS","worker_version":health["version"],"engine_version":health["engine_version"],"job_id":jid,"input_3mf_bytes":len(model),"input_3mf_sha256":hashlib.sha256(model).hexdigest(),"slice_checks":checks,"sliced_3mf_bytes":len(sliced),"sliced_3mf_sha256":hashlib.sha256(sliced).hexdigest(),"gcode_entries":entries,"gcode_bytes":sum(map(len,gcode_blobs)),"layer_markers":marker_count,"completion_marker":completion,"package_mode":v.get("package_mode"),"native_slice_completed":v.get("native_slice_completed")},ensure_ascii=False))
           PY
 
       - name: Generic Blender profile real job
@@ -348,11 +454,15 @@ jobs:
 
       - name: Container logs on failure
         if: failure()
-        run: docker logs --tail 250 makersence-shadow || true
+        run: |
+          docker logs --tail 250 makersence-shadow || true
+          docker logs --tail 250 makersence-shadow-slicer || true
 
       - name: Stop isolated runtime
         if: always()
-        run: docker rm -f makersence-shadow || true
+        run: |
+          docker rm -f makersence-shadow || true
+          docker rm -f makersence-shadow-slicer || true
 
 
   engineering-tooling-shadow:
