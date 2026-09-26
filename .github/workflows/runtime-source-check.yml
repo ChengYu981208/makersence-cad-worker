@@ -30,7 +30,7 @@ jobs:
         run: bash -n runtime/slicer/start.sh
       - name: Runtime version markers
         run: |
-          grep -F "2.59.0-08mm-typography" runtime/heavy/app.py
+          grep -F "2.60.0-generic-blender-profile" runtime/heavy/app.py
           grep -F "2.13.0-08mm-typography" runtime/cad-core-v5/app.py
           grep -F "1.1.11" runtime/slicer/app.py
           grep -F "3.2.0-inkscape-svg" app/main.py
@@ -83,4 +83,11 @@ jobs:
           assert "def normalize_svg_bytes(" in tooling
           assert "RASTER_IMAGE_FORBIDDEN" in tooling
           print("INKSCAPE_ADAPTER_SOURCE_GUARDS_PASS")
+          heavy=Path("runtime/heavy/app.py").read_text(encoding="utf-8")
+          assert "generic_blender_profile_executor_v1" in heavy
+          assert "GENERIC_BLENDER_PROFILE_SCRIPT" in heavy
+          assert "def generic_blender_profile(" in heavy
+          assert "GENERIC_BLENDER_APPEARANCE_PROFILE_NOT_READY" in heavy
+          assert "hybrid_bone_tag(" not in heavy
+          print("GENERIC_BLENDER_SOURCE_GUARDS_PASS")
           PY
