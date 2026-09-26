@@ -29,6 +29,51 @@ jobs:
           python -m compileall -q app
       - name: Slicer shell syntax
         run: bash -n runtime/slicer/start.sh
+      - name: Design model router contract
+        run: |
+          python - <<'PY'
+          import hashlib,os,sys
+          sys.path.insert(0,"runtime/heavy")
+          import design_model_router as router
+          raw=b"glTF"+b"\x02\x00\x00\x00"+b"\x18\x00\x00\x00"+b"makerSence12"
+          sha=hashlib.sha256(raw).hexdigest()
+          class FakeResponse:
+              status=200
+              headers={
+                  "Content-Type":"model/gltf-binary",
+                  "X-MakerSence-Provider-Version":"triposg-contract-test",
+                  "X-MakerSence-Artifact-Sha256":sha,
+              }
+              def __enter__(self): return self
+              def __exit__(self,*args): return False
+              def read(self,n=-1): return raw
+          def fake_urlopen(req,timeout=None):
+              assert req.full_url=="https://modal.example.com/generate"
+              assert req.headers.get("Authorization")=="Bearer test-token"
+              return FakeResponse()
+          router.urlopen=fake_urlopen
+          os.environ["MODAL_TRIPOSG_ENDPOINT"]="https://modal.example.com/generate"
+          os.environ["MODAL_TRIPOSG_TOKEN"]="test-token"
+          out=router.route_design_model({
+              "provider":"modal_triposg",
+              "mode":"image_to_3d",
+              "source_image_url":"https://example.com/reference.png",
+              "prompt":"product concept",
+              "target_faces":5000,
+              "output_format":"glb",
+          })
+          assert out["status"]=="PASS"
+          assert out["artifact_bytes"]==raw
+          assert out["artifact_sha256"]==sha
+          assert out["content_type"]=="model/gltf-binary"
+          assert out["provider"]=="modal_triposg"
+          try:
+              router.route_design_model({"provider":"unknown","source_image_url":"https://example.com/a.png"})
+              raise AssertionError("unsupported provider did not fail closed")
+          except router.DesignModelProviderError as exc:
+              assert "DESIGN_MODEL_PROVIDER_UNSUPPORTED:unknown" in str(exc)
+          print("DESIGN_MODEL_ROUTER_CONTRACT_PASS")
+          PY
       - name: Runtime version markers
         run: |
           grep -F "2.61.0-design-model-router" runtime/heavy/app.py
