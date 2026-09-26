@@ -30,8 +30,8 @@ jobs:
         run: bash -n runtime/slicer/start.sh
       - name: Runtime version markers
         run: |
-          grep -F "2.58.0-generic-geometry-render" runtime/heavy/app.py
-          grep -F "2.12.0-generic-geometry-render" runtime/cad-core-v5/app.py
+          grep -F "2.59.0-08mm-typography" runtime/heavy/app.py
+          grep -F "2.13.0-08mm-typography" runtime/cad-core-v5/app.py
           grep -F "1.1.11" runtime/slicer/app.py
           grep -F "3.1.0-manifold-lib3mf" app/main.py
       - name: No source-chunk dependency in packaged runtimes
@@ -67,4 +67,13 @@ jobs:
               assert "svg_profile_extrusion" in text, f"{name}: generic SVG route missing"
               assert "formal_geometry_only_render_v1" in text, f"{name}: geometry-only render capability missing"
           print("GENERIC_RUNTIME_GUARDS_PASS")
+          for name,text in texts.items():
+              assert "TEXT_MIN_STROKE_DEFAULT=0.80" in text, f"{name}: text stroke floor must remain 0.8 mm"
+              assert "TEXT_LATIN_GAP_DEFAULT=0.80" in text, f"{name}: Latin/digit gap must remain 0.8 mm"
+              assert "TEXT_CJK_GAP_DEFAULT=0.80" in text, f"{name}: CJK gap must remain 0.8 mm"
+              assert "TEXT_CJK_INTERNAL_GAP_DEFAULT=0.80" in text, f"{name}: CJK internal gap must remain 0.8 mm"
+              assert '"MakerSenseTypography":"bambu_04_slicer_safe_v4_08mm"' in text, f"{name}: 3MF typography policy metadata is stale"
+              assert '"MakerSenseTextMinStroke":"0.80"' in text, f"{name}: 3MF text stroke metadata is below baseline"
+              assert '"line_width":"0.42"' in text, f"{name}: Bambu slicer line width must stay a process setting"
+          print("TYPOGRAPHY_08MM_GUARDS_PASS")
           PY
