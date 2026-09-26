@@ -25,14 +25,14 @@ shared_secret = modal.Secret.from_name(
 
 triposg_image = (
     modal.Image.from_registry(
-        "nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04",
+        "nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04",
         add_python="3.10",
     )
-    .apt_install("git", "libgl1", "libglib2.0-0", "libxrender1", "libxext6")
+    .apt_install("git", "build-essential", "libgl1", "libglib2.0-0", "libxrender1", "libxext6")
     .run_commands(
         "git clone https://github.com/VAST-AI-Research/TripoSG.git /opt/TripoSG",
         f"cd /opt/TripoSG && git checkout {TRIPOSG_SOURCE_COMMIT}",
-        "python -m pip install --upgrade pip",
+        "python -m pip install --upgrade pip wheel setuptools ninja",
         "python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124",
         "grep -v '^diso' /opt/TripoSG/requirements.txt > /tmp/triposg-requirements-no-diso.txt",
         "python -m pip install -r /tmp/triposg-requirements-no-diso.txt",
