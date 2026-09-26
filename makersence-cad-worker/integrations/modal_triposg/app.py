@@ -172,9 +172,11 @@ class TripoSGModel:
             raise ValueError("TARGET_FACES_RANGE")
 
         image = Image.open(io.BytesIO(bytes(image_bytes))).convert("RGBA")
+        temp_image_path = "/tmp/makersence-triposg-input.png"
+        image.save(temp_image_path, format="PNG")
         mesh = self.run_triposg(
             self.pipe,
-            image_input=image,
+            image_input=temp_image_path,
             rmbg_net=self.rmbg_net,
             seed=int(seed),
             num_inference_steps=50,
