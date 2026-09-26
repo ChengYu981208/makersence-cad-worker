@@ -2,8 +2,9 @@ FROM python:3.11
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    blender fonts-noto-cjk fonts-dejavu-core libgl1 libglib2.0-0 \
-    && rm -rf /var/lib/apt/lists/*
+    blender python3-numpy fonts-noto-cjk fonts-dejavu-core libgl1 libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/* \
+    && blender --background --python-expr "import numpy; print('BLENDER_NUMPY_OK', numpy.__version__)"
 COPY requirements.runtime.txt .
 RUN python -m pip install --no-cache-dir -r requirements.runtime.txt
 COPY design_model_router.py /app/design_model_router.py
