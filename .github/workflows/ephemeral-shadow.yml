@@ -1,0 +1,260 @@
+name: Ephemeral Runtime Shadow
+
+on:
+  push:
+    branches:
+      - consolidation/runtime-snapshots-20260925
+    paths:
+      - "makersence-cad-worker/runtime/heavy/**"
+      - "makersence-cad-worker/runtime/cad-core-v5/**"
+      - ".github/workflows/ephemeral-shadow.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ephemeral-runtime-shadow-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  runtime-shadow:
+    name: Shadow ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: heavy
+            context: makersence-cad-worker/runtime/heavy
+            image: makersence-shadow-heavy
+            expected_version: 2.59.0-08mm-typography
+            expect_multiview: "false"
+          - name: cad-core-v5
+            context: makersence-cad-worker/runtime/cad-core-v5
+            image: makersence-shadow-cad-core-v5
+            expected_version: 2.13.0-08mm-typography
+            expect_multiview: "true"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build isolated runtime image
+        run: docker build --pull -t "${{ matrix.image }}" "${{ matrix.context }}"
+
+      - name: Start isolated runtime
+        run: |
+          docker run -d --name makersence-shadow \
+            -e WORKER_TOKEN=ephemeral-shadow-token \
+            -e PORT=8000 \
+            -e MAKERSENCE_HEAVY_CONCURRENCY=1 \
+            -p 18000:8000 \
+            "${{ matrix.image }}"
+
+      - name: Health and capability gate
+        env:
+          EXPECTED_VERSION: ${{ matrix.expected_version }}
+          EXPECT_MULTIVIEW: ${{ matrix.expect_multiview }}
+        run: |
+          python - <<'PY'
+          import json, os, time, urllib.request
+          url="http://127.0.0.1:18000/health"
+          last=None
+          for _ in range(120):
+              try:
+                  with urllib.request.urlopen(url, timeout=3) as r:
+                      last=json.load(r)
+                  if last.get("ok"):
+                      break
+              except Exception as e:
+                  last={"error":str(e)}
+              time.sleep(1)
+          if not isinstance(last,dict) or not last.get("ok"):
+              raise SystemExit("health failed: "+repr(last))
+          expected=os.environ["EXPECTED_VERSION"]
+          if last.get("version")!=expected:
+              raise SystemExit(f"version mismatch: {last.get('version')} != {expected}")
+          caps=set(last.get("capabilities") or [])
+          required={"universal_cad_recipe_v2","fail_closed_family_router_v1","formal_geometry_only_render_v1","text_08mm_baseline_v1"}
+          missing=sorted(required-caps)
+          if missing:
+              raise SystemExit("missing capabilities: "+",".join(missing))
+          if os.environ["EXPECT_MULTIVIEW"]=="true" and "multi_view_real_geometry_render_v1" not in caps:
+              raise SystemExit("CAD Core multiview capability missing")
+          print(json.dumps({"status":"PASS","version":last["version"],"bambu":last.get("bambu_slicer"),"required_capabilities":sorted(required)},ensure_ascii=False))
+          PY
+
+      - name: Universal CAD real job
+        env:
+          EXPECT_MULTIVIEW: ${{ matrix.expect_multiview }}
+        run: |
+          cat > /tmp/request.json <<'JSON'
+          {
+            "module":"ephemeral_shadow",
+            "module_version":"shadow-v1",
+            "printer_profile":"bambu_a1_mini_04",
+            "idempotency_key":"ephemeral-shadow-universal-v1",
+            "appearance_hash":"ephemeral-shadow-geometry-v1",
+            "appearance_lock":{
+              "appearance_hash":"ephemeral-shadow-geometry-v1",
+              "version":1,
+              "protected_cad_fields":["family"]
+            },
+            "cad_contract":{
+              "family":"universal_cad_recipe",
+              "wall_mm":2.4,
+              "xy_clearance_mm":0.25,
+              "body_color":"#6d7480",
+              "universal_recipe":{
+                "status":"READY",
+                "hard_blockers":[],
+                "reconstruction_mode":"PLANAR_PRISMATIC_RECONSTRUCTION",
+                "geometry_evidence":{
+                  "source_part_count":1,
+                  "dimensions_mm":[40,30,4]
+                },
+                "feature_graph":{
+                  "nodes":[
+                    {
+                      "id":"OUTLINE_1",
+                      "type":"measured_outline",
+                      "axis":"Z",
+                      "outline":[[0,0],[40,0],[40,30],[0,30]],
+                      "thickness_mm":4
+                    },
+                    {
+                      "id":"HOLE_1",
+                      "type":"circular_hole",
+                      "operation":"CUT",
+                      "axis":"Z",
+                      "center_2d_mm":[20,15],
+                      "diameter_mm":6,
+                      "through":true
+                    }
+                  ]
+                }
+              }
+            },
+            "parameters":{
+              "manufacturing_profile":{
+                "printer_profile":"bambu_a1_mini_04",
+                "build_volume_mm":[180,180,180],
+                "nozzle_mm":0.4,
+                "max_colors":4,
+                "min_feature_mm":0.8,
+                "min_text_stroke_mm":0.8,
+                "text_line_width_mm":0.42,
+                "text_cjk_gap_mm":0.8,
+                "text_cjk_internal_gap_mm":0.8,
+                "text_latin_gap_mm":0.8,
+                "wall_generator":"arachne",
+                "preferred_wall_mm":2.4,
+                "xy_clearance_mm":0.25,
+                "gradient":false
+              }
+            }
+          }
+          JSON
+          python - <<'PY'
+          import json, os, time, urllib.request
+          base="http://127.0.0.1:18000"
+          token="ephemeral-shadow-token"
+          headers={"Authorization":"Bearer "+token,"Content-Type":"application/json"}
+          body=open("/tmp/request.json","rb").read()
+          req=urllib.request.Request(base+"/v1/generate",data=body,headers=headers,method="POST")
+          with urllib.request.urlopen(req,timeout=10) as r:
+              submitted=json.load(r)
+          jid=submitted.get("job_id")
+          if not jid:
+              raise SystemExit("generate did not return job_id: "+repr(submitted))
+          job=None
+          for _ in range(180):
+              q=urllib.request.Request(base+"/v1/jobs/"+jid,headers={"Authorization":"Bearer "+token})
+              with urllib.request.urlopen(q,timeout=5) as r:
+                  job=json.load(r)
+              if job.get("status") in ("completed","failed"):
+                  break
+              time.sleep(1)
+          if not job or job.get("status")!="completed":
+              raise SystemExit("universal job failed: "+json.dumps(job,ensure_ascii=False))
+          v=job.get("validation") or {}
+          core={
+            "brep_valid":v.get("brep_valid") is True,
+            "watertight":v.get("watertight") is True,
+            "open_edges_zero":int(v.get("open_edges") or 0)==0,
+            "nonmanifold_zero":int(v.get("nonmanifold_edges") or 0)==0,
+            "zero_volume_false":v.get("zero_volume") is False,
+            "a1_mini_fit":v.get("a1_mini_fit") is True,
+            "ams_colors_ok":v.get("ams_colors_ok") is True,
+            "nozzle_profile_ok":v.get("nozzle_profile_ok") is True,
+            "bambu_mesh_topology_ok":v.get("bambu_mesh_topology_ok") is True,
+            "preview_matches_export":v.get("preview_matches_export") is True
+          }
+          bad=[k for k,ok in core.items() if not ok]
+          if bad:
+              raise SystemExit("universal core validation failed: "+",".join(bad)+"\n"+json.dumps(v,ensure_ascii=False))
+          artifacts=job.get("artifacts") or []
+          names={str(a.get("name") or "") for a in artifacts}
+          for name in ("model.stl","model.step","model.3mf","preview.glb","manifest.json","product_render_main.png"):
+              if name not in names:
+                  raise SystemExit("missing artifact: "+name+" names="+repr(sorted(names)))
+          expected_multi=os.environ["EXPECT_MULTIVIEW"]=="true"
+          views=("product_render_front.png","product_render_back.png","product_render_side.png","product_render_perspective.png")
+          if expected_multi and not all(x in names for x in views):
+              raise SystemExit("CAD Core four-view artifacts missing: "+repr(sorted(names)))
+          if expected_multi:
+              pv=v.get("product_render_views") or {}
+              geometry_hash=str(pv.get("geometry_3mf_sha256") or "")
+              vd=pv.get("views") or {}
+              if len(geometry_hash)!=64 or not all(str((vd.get(k) or {}).get("geometry_3mf_sha256") or "")==geometry_hash for k in ("front","back","side","perspective")):
+                  raise SystemExit("four-view geometry lineage mismatch: "+json.dumps(pv,ensure_ascii=False))
+          # Download real files from the running container endpoint.
+          probe=["model.stl","model.step","model.3mf","preview.glb","manifest.json","product_render_main.png"]+(list(views) if expected_multi else [])
+          by_name={str(a.get("name") or ""):a for a in artifacts}
+          sizes={}
+          for name in probe:
+              a=by_name[name]
+              q=urllib.request.Request(base+a["url"],headers={"Authorization":"Bearer "+token})
+              with urllib.request.urlopen(q,timeout=15) as r:
+                  data=r.read()
+              if len(data)<32:
+                  raise SystemExit("artifact empty: "+name)
+              sizes[name]=len(data)
+          print(json.dumps({"status":"PASS","job_id":jid,"execution_mode":job.get("execution_mode"),"core":core,"artifact_sizes":sizes,"validation_status":v.get("status")},ensure_ascii=False))
+          PY
+
+      - name: Unknown family must fail closed
+        run: |
+          python - <<'PY'
+          import json, time, urllib.request
+          base="http://127.0.0.1:18000";token="ephemeral-shadow-token"
+          payload={
+            "module":"ephemeral_shadow",
+            "idempotency_key":"ephemeral-shadow-unknown-v1",
+            "appearance_hash":"ephemeral-shadow-unknown",
+            "appearance_lock":{"appearance_hash":"ephemeral-shadow-unknown"},
+            "cad_contract":{"family":"definitely_unknown_product_family"},
+            "parameters":{"manufacturing_profile":{"printer_profile":"bambu_a1_mini_04","build_volume_mm":[180,180,180],"nozzle_mm":0.4,"max_colors":4,"min_feature_mm":0.8}}
+          }
+          req=urllib.request.Request(base+"/v1/generate",data=json.dumps(payload).encode(),headers={"Authorization":"Bearer "+token,"Content-Type":"application/json"},method="POST")
+          with urllib.request.urlopen(req,timeout=10) as r:
+              submitted=json.load(r)
+          jid=submitted["job_id"];job=None
+          for _ in range(60):
+              q=urllib.request.Request(base+"/v1/jobs/"+jid,headers={"Authorization":"Bearer "+token})
+              with urllib.request.urlopen(q,timeout=5) as r: job=json.load(r)
+              if job.get("status") in ("completed","failed"):break
+              time.sleep(.5)
+          if not job or job.get("status")!="failed":
+              raise SystemExit("unknown family did not fail closed: "+repr(job))
+          msg=str(job.get("error") or (job.get("validation") or {}).get("geometry_error") or "")
+          if "CAD_FAMILY_UNSUPPORTED_USE_UNIVERSAL_CAD_RECIPE" not in msg:
+              raise SystemExit("wrong fail-closed error: "+msg)
+          print(json.dumps({"status":"PASS","error":msg},ensure_ascii=False))
+          PY
+
+      - name: Container logs on failure
+        if: failure()
+        run: docker logs --tail 250 makersence-shadow || true
+
+      - name: Stop isolated runtime
+        if: always()
+        run: docker rm -f makersence-shadow || true
