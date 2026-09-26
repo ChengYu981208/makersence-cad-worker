@@ -33,7 +33,7 @@ jobs:
           grep -F "2.59.0-08mm-typography" runtime/heavy/app.py
           grep -F "2.13.0-08mm-typography" runtime/cad-core-v5/app.py
           grep -F "1.1.11" runtime/slicer/app.py
-          grep -F "3.1.0-manifold-lib3mf" app/main.py
+          grep -F "3.2.0-inkscape-svg" app/main.py
       - name: No source-chunk dependency in packaged runtimes
         run: |
           ! grep -R "WORKER_SRC_" runtime/heavy runtime/cad-core-v5
@@ -76,4 +76,11 @@ jobs:
               assert '"MakerSenseTextMinStroke":"0.80"' in text, f"{name}: 3MF text stroke metadata is below baseline"
               assert '"line_width":"0.42"' in text, f"{name}: Bambu slicer line width must stay a process setting"
           print("TYPOGRAPHY_08MM_GUARDS_PASS")
+          root=Path("app/main.py").read_text(encoding="utf-8")
+          tooling=Path("app/tooling.py").read_text(encoding="utf-8")
+          assert "inkscape_svg_normalize_v1" in root
+          assert "svg_raster_reject_v1" in root
+          assert "def normalize_svg_bytes(" in tooling
+          assert "RASTER_IMAGE_FORBIDDEN" in tooling
+          print("INKSCAPE_ADAPTER_SOURCE_GUARDS_PASS")
           PY
