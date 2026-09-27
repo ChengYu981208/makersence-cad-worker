@@ -108,23 +108,63 @@ def _valid_instance_interface_selection(value: Any, index: int) -> bool:
     )
 
 
+def _valid_clearance_pair_proofs(arrangement: dict, expected: int, required_gap: float) -> tuple[bool, bool]:
+    rows = _list(arrangement.get("clearance_pair_proofs"))
+    expected_pairs = {(left, right) for left in range(expected) for right in range(left + 1, expected)}
+    seen: set[tuple[int, int]] = set()
+    exact_used = False
+    for value in rows:
+        row = _dict(value)
+        left = row.get("first_instance_index")
+        right = row.get("second_instance_index")
+        if (not isinstance(left, int) or isinstance(left, bool)
+                or not isinstance(right, int) or isinstance(right, bool)):
+            return False, exact_used
+        pair = (min(left, right), max(left, right))
+        method = str(row.get("method") or "")
+        clearance = _number(row.get("clearance_lower_bound_mm"))
+        row_gap = _number(row.get("required_gap_mm"))
+        if (pair not in expected_pairs or pair in seen or row.get("status") != "PASS"
+                or clearance is None or clearance + 1e-4 < required_gap
+                or row_gap is None or abs(row_gap - required_gap) > 1e-4):
+            return False, exact_used
+        if method == "MANIFOLD3D_EXACT_MESH_GAP":
+            overlap = _number(row.get("overlap_volume_mm3"))
+            if overlap is None or overlap > 1e-8:
+                return False, exact_used
+            exact_used = True
+        elif method != "AABB_SEPARATION_LOWER_BOUND":
+            return False, exact_used
+        seen.add(pair)
+    return seen == expected_pairs, exact_used
+
+
 def _complete_multi_instance_alignment(alignment: dict, expected: int, matched: int) -> bool:
     transforms = _list(alignment.get("instance_transforms_4x4"))
     selections = _list(alignment.get("instance_interface_selections"))
     arrangement = _dict(alignment.get("instance_arrangement"))
     gap = _number(arrangement.get("minimum_instance_gap_mm"))
+    pair_proofs_ready, exact_gap_used = _valid_clearance_pair_proofs(arrangement, expected, gap) if gap is not None else (False, False)
+    expected_method = (
+        "BOUNDED_MANIFOLD3D_MESH_GAP_ARRANGEMENT_V1" if exact_gap_used
+        else "BOUNDED_NONOVERLAPPING_AABB_ARRANGEMENT_V1"
+    )
+    expected_proof = (
+        "AABB_AND_MANIFOLD3D_EXACT_GAP" if exact_gap_used
+        else "NONOVERLAPPING_AXIS_ALIGNED_BOUNDING_BOXES"
+    )
     if (
         expected < 2 or matched != expected
         or alignment.get("instance_solution_complete") is not True
-        or alignment.get("instance_solution_method") != "BOUNDED_NONOVERLAPPING_AABB_ARRANGEMENT_V1"
+        or alignment.get("instance_solution_method") != expected_method
         or len(transforms) != expected or len(selections) != expected
         or not all(_valid_transform(matrix) for matrix in transforms)
         or not all(_valid_instance_interface_selection(row, index) for index, row in enumerate(selections))
         or not all(_same_transform(selections[index].get("transform_4x4"), transforms[index]) for index in range(expected))
         or arrangement.get("candidate_arrangement_search_complete") is not True
         or arrangement.get("uniqueness_basis") != "SEARCHED_CANDIDATE_POSES_ONLY"
-        or arrangement.get("separation_proof") != "NONOVERLAPPING_AXIS_ALIGNED_BOUNDING_BOXES"
-        or gap is None or gap < 0
+        or arrangement.get("separation_proof") != expected_proof
+        or gap is None or gap < 0 or not pair_proofs_ready
     ):
         return False
     return True
