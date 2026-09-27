@@ -4676,7 +4676,12 @@ class Handler(BaseHTTPRequestHandler):
             if path=="/v1/align-counterpart":
                 if n<=0 or n>300_000:return self.send_json(400,{"error":"invalid counterpart alignment request"})
                 req=json.loads(self.rfile.read(n).decode("utf-8"))
-                out=align_counterpart_urls(req.get("source_url"),req.get("counterpart_url"),req.get("relation") or "support",req.get("expected_instances",1),req.get("counterpart_context"))
+                source_part_ids=req.get("source_part_ids")
+                if source_part_ids is not None:
+                    if not isinstance(source_part_ids,list) or not 1<=len(source_part_ids)<=32 or any(not isinstance(x,str) or not x.strip() or len(x)>128 for x in source_part_ids):
+                        return self.send_json(400,{"error":"source_part_ids must contain 1 to 32 non-empty strings"})
+                    source_part_ids=sorted({x.strip() for x in source_part_ids})
+                out=align_counterpart_urls(req.get("source_url"),req.get("counterpart_url"),req.get("relation") or "support",req.get("expected_instances",1),req.get("counterpart_context"),source_part_ids)
                 return self.send_json(200,out)
             if path=="/v1/resolve-mechanism-pose":
                 if n<=0 or n>2_000_000:return self.send_json(400,{"error":"invalid mechanism pose request"})
