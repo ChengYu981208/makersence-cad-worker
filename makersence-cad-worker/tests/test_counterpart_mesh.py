@@ -29,6 +29,13 @@ MODEL = """<?xml version="1.0" encoding="UTF-8"?>
 """
 
 
+MULTI_ROOT_MODEL = MODEL.replace(
+    '<build><item objectid="3"/></build>',
+    '<build><item objectid="1" transform="1 0 0 0 1 0 0 0 1 -40 0 0"/>'
+    '<item objectid="2" transform="1 0 0 0 1 0 0 0 1 60 0 0"/></build>',
+)
+
+
 class ThreeMFAssemblyMeshTests(unittest.TestCase):
     def make_model(self, xml=MODEL):
         folder = tempfile.TemporaryDirectory()
@@ -47,6 +54,25 @@ class ThreeMFAssemblyMeshTests(unittest.TestCase):
         self.assertEqual(mesh["assembly"]["source_structure"], "TRANSFORM_AWARE_3MF_BUILD_GRAPH")
         self.assertEqual(mesh["bbox"]["min"], [0.0, 0.0, 0.0])
         self.assertEqual(mesh["bbox"]["max"], [30.0, 10.0, 10.0])
+
+    def test_reviewed_root_selection_excludes_unrelated_print_plate_roots(self):
+        mesh = load_3mf_assembly_mesh(
+            self.make_model(MULTI_ROOT_MODEL),
+            root_object_ids=["2"],
+        )
+        self.assertEqual(mesh["assembly"]["root_count"], 1)
+        self.assertEqual(mesh["assembly"]["total_root_count"], 2)
+        self.assertEqual(mesh["assembly"]["unselected_root_count"], 1)
+        self.assertEqual(mesh["assembly"]["selected_root_object_ids"], ["2"])
+        self.assertEqual(mesh["assembly"]["included_part_ids"], ["3D/3dmodel.model#2"])
+        self.assertEqual(mesh["bbox"]["dimensions"], [10.0, 10.0, 10.0])
+
+    def test_reviewed_root_selection_fails_closed_when_part_is_missing(self):
+        with self.assertRaisesRegex(ValueError, "3MF_ALIGNMENT_SELECTED_ROOT_MISSING:99"):
+            load_3mf_assembly_mesh(
+                self.make_model(MULTI_ROOT_MODEL),
+                root_object_ids=["99"],
+            )
 
     def test_rejects_assemblies_that_exceed_the_expanded_triangle_budget(self):
         with self.assertRaisesRegex(ValueError, "3MF_ALIGNMENT_EXPANDED_MESH_BUDGET_EXCEEDED"):

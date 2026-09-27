@@ -74,13 +74,15 @@ def _point(point: tuple[float, float, float], transform: tuple[tuple[float, ...]
 def load_3mf_assembly_mesh(
     path: str,
     *,
+    root_object_ids: list[str] | None = None,
     max_vertices: int = 180_000,
     max_triangles: int = 320_000,
 ) -> dict[str, Any]:
-    """Expand all printable build roots and component transforms into one mesh.
+    """Expand selected reviewed build roots, or all roots, with component transforms.
 
-    Limits apply after assembly instances are expanded. Oversized input fails
-    closed before the aligner can consume unbounded memory.
+    User-reviewed root IDs can exclude unrelated print-plate objects from
+    counterpart alignment. Limits apply after selected assembly instances are
+    expanded. Oversized or unresolved selections fail closed.
     """
     if max_vertices < 4 or max_triangles < 4:
         raise ValueError("3MF_ALIGNMENT_BUDGET_INVALID")
@@ -196,6 +198,20 @@ def load_3mf_assembly_mesh(
     if not build:
         raise ValueError("3MF_ALIGNMENT_BUILD_GRAPH_EMPTY")
 
+    selected_ids: set[str] | None = None
+    unselected_root_count = 0
+    if root_object_ids is not None:
+        selected_ids = {str(value).strip() for value in root_object_ids if str(value).strip()}
+        if not selected_ids:
+            raise ValueError("3MF_ALIGNMENT_SELECTED_ROOT_IDS_EMPTY")
+        available_ids = {str(root.get("id") or "") for root in build}
+        missing_ids = sorted(selected_ids - available_ids)
+        if missing_ids:
+            raise ValueError("3MF_ALIGNMENT_SELECTED_ROOT_MISSING:" + ",".join(missing_ids))
+        original_root_count = len(build)
+        build = [root for root in build if str(root.get("id") or "") in selected_ids]
+        unselected_root_count = original_root_count - len(build)
+
     vertices: list[tuple[float, float, float]] = []
     triangles: list[tuple[int, int, int]] = []
     included_parts: list[str] = []
@@ -255,6 +271,9 @@ def load_3mf_assembly_mesh(
         },
         "assembly": {
             "root_count": len(build),
+            "total_root_count": len(build) + unselected_root_count,
+            "unselected_root_count": unselected_root_count,
+            "selected_root_object_ids": sorted(selected_ids) if selected_ids is not None else None,
             "part_instance_count": len(included_parts),
             "source_structure": "TRANSFORM_AWARE_3MF_BUILD_GRAPH",
             "included_part_ids": included_parts,
