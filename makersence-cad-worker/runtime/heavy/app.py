@@ -4398,7 +4398,7 @@ def align_counterpart_urls(source_url,counterpart_url,relation="support",expecte
     try:expected_instances=max(1,min(12,int(expected_instances or 1)))
     except Exception:raise ValueError("counterpart expected_instances must be an integer from 1 to 12")
     sp,sbytes=_ca_download_3mf(source_url,"source");cp,cbytes=_ca_download_3mf(counterpart_url,"counterpart")
-    src=load_3mf_assembly_mesh(sp,root_object_ids=source_part_ids);ctr=_ca_largest_mesh_3mf(cp)
+    src=load_3mf_assembly_mesh(sp,part_object_ids=source_part_ids);ctr=_ca_largest_mesh_3mf(cp)
     src_surface=_ca_surface_samples(src,12000);h=_ca_hash(src_surface,5.0);ctr_pts=_ca_point_samples(ctr,900)
     rotations=_ca_rotations()
     ranked=sorted([(round(_ca_orientation_affinity(src["bbox"]["dimensions"],_ca_rot_bbox(ctr["bbox"],m)),6),m) for m in rotations],key=lambda x:x[0])[:10]
