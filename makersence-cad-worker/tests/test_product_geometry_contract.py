@@ -90,10 +90,6 @@ class ProductGeometryContractTests(unittest.TestCase):
         self.assertEqual(protected_rebuild_blockers({}), ["PRODUCT_GEOMETRY_CONTRACT_MISSING"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
     def test_protected_hybrid_request_stops_before_external_provider(self):
         import importlib.util
         import types
@@ -126,3 +122,6 @@ if __name__ == "__main__":
         with self.assertRaisesRegex(ValueError, "INTERFACE_PRESERVING_REBUILD_BLOCKED"):
             runtime.design_model_hybrid(contract, {})
         self.assertEqual(provider_calls, [])
+
+if __name__ == "__main__":
+    unittest.main()
