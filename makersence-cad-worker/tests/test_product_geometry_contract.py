@@ -86,6 +86,7 @@ def ready_device_envelope_contract():
         "part_ids": ["DEVICE_REFERENCE"],
         "alignment": {
             "status": "ALIGNED", "confidence": "HIGH", "pose_unique": True, "solution_count": 1,
+            "expected_instances": 1, "matched_instances": 1,
             "selected_transform_4x4": [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]],
             "candidate_poses": [],
         },
@@ -99,6 +100,35 @@ def ready_device_envelope_contract():
     signature["executor_binding"] = {"operation": "BUILD_CLEARANCE_CRADLE", "geometry_node_id": "CRADLE"}
     contract["design_scope_contract"]["interface_mode"] = "DEVICE_ENVELOPE"
     return contract
+
+def ready_multi_device_envelope_contract():
+    contract = ready_device_envelope_contract()
+    alignment = contract["product_geometry_contract"]["interface_reference"]["alignment"]
+    identity = [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]
+    second = [[1,0,0,20],[0,1,0,0],[0,0,1,0],[0,0,0,1]]
+    alignment.update({
+        "expected_instances": 2, "matched_instances": 2,
+        "selected_transform_4x4": None,
+        "instance_transforms_4x4": [identity, second],
+        "instance_solution_method": "BOUNDED_NONOVERLAPPING_AABB_ARRANGEMENT_V1",
+        "instance_solution_complete": True,
+        "instance_interface_selections": [
+            {"instance_index": 0, "axis": "Y", "plane_mm": 3, "raw_source_plane_mm": 7,
+             "band_mm": 8, "span_mm": 20, "confidence": "HIGH",
+             "coordinate_frame": "source_largest_part_min_normalized", "transform_4x4": identity},
+            {"instance_index": 1, "axis": "Y", "plane_mm": 5, "raw_source_plane_mm": 9,
+             "band_mm": 8, "span_mm": 20, "confidence": "HIGH",
+             "coordinate_frame": "source_largest_part_min_normalized", "transform_4x4": second},
+        ],
+        "instance_arrangement": {
+            "candidate_arrangement_search_complete": True,
+            "uniqueness_basis": "SEARCHED_CANDIDATE_POSES_ONLY",
+            "separation_proof": "NONOVERLAPPING_AXIS_ALIGNED_BOUNDING_BOXES",
+            "minimum_instance_gap_mm": 0.0,
+        },
+    })
+    return contract
+
 
 class ProductGeometryContractTests(unittest.TestCase):
     def test_unmapped_live_shape_is_blocked_before_provider_call(self):
@@ -167,6 +197,23 @@ class ProductGeometryContractTests(unittest.TestCase):
         contract["product_geometry_contract"]["interface_reference"].pop("export_policy")
         blockers = interface_preserving_contract_issues(contract)
         self.assertIn("DEVICE_ENVELOPE_REFERENCE_CLASSIFICATION_INVALID", blockers)
+
+    def test_device_envelope_multi_instance_requires_complete_interface_selections(self):
+        contract = ready_multi_device_envelope_contract()
+        self.assertEqual(interface_preserving_contract_issues(contract), [])
+        self.assertEqual(protected_rebuild_blockers(contract), ["INTERFACE_PRESERVING_REBUILD_EXECUTOR_NOT_IMPLEMENTED"])
+
+        alignment = contract["product_geometry_contract"]["interface_reference"]["alignment"]
+        alignment["instance_interface_selections"].pop()
+        blockers = interface_preserving_contract_issues(contract)
+        self.assertIn("DEVICE_ENVELOPE_INSTANCE_ARRANGEMENT_INCOMPLETE", blockers)
+        self.assertIn("DEVICE_ENVELOPE_ALIGNMENT_UNRESOLVED", blockers)
+
+        contract = ready_multi_device_envelope_contract()
+        contract["product_geometry_contract"]["interface_reference"]["alignment"]["instance_solution_complete"] = False
+        blockers = interface_preserving_contract_issues(contract)
+        self.assertIn("DEVICE_ENVELOPE_INSTANCE_ARRANGEMENT_INCOMPLETE", blockers)
+
 
     def test_nonprotected_hybrid_contract_does_not_force_protected_route(self):
         self.assertFalse(is_interface_preserving_scope({"design_scope_contract": {"protect_mating_interface": False}}))
