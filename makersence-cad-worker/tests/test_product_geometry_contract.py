@@ -85,7 +85,7 @@ def ready_device_envelope_contract():
         "export_policy": "EXCLUDE_FROM_PRINTABLE_OUTPUT",
         "part_ids": ["DEVICE_REFERENCE"],
         "alignment": {
-            "status": "ALIGNED", "confidence": "HIGH", "pose_unique": True, "solution_count": 1,
+            "status": "ALIGNED", "confidence": "HIGH", "algorithm_version": "counterpart-alignment-v2-assembly-graph", "pose_unique": True, "solution_count": 1,
             "expected_instances": 1, "matched_instances": 1,
             "selected_transform_4x4": [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]],
             "candidate_poses": [],
@@ -197,6 +197,12 @@ class ProductGeometryContractTests(unittest.TestCase):
         contract["product_geometry_contract"]["interface_reference"].pop("export_policy")
         blockers = interface_preserving_contract_issues(contract)
         self.assertIn("DEVICE_ENVELOPE_REFERENCE_CLASSIFICATION_INVALID", blockers)
+
+    def test_device_envelope_rejects_legacy_alignment_algorithm_version(self):
+        contract = ready_device_envelope_contract()
+        contract["product_geometry_contract"]["interface_reference"]["alignment"].pop("algorithm_version")
+        blockers = interface_preserving_contract_issues(contract)
+        self.assertIn("DEVICE_ENVELOPE_ALIGNMENT_ALGORITHM_VERSION_UNSUPPORTED", blockers)
 
     def test_device_envelope_multi_instance_requires_complete_interface_selections(self):
         contract = ready_multi_device_envelope_contract()
