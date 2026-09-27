@@ -125,9 +125,11 @@ def interface_preserving_contract_issues(contract: Any) -> list[str]:
             issues.append("DEVICE_ENVELOPE_COUNTERPART_MUST_NOT_BE_PRINTED")
         for reference_id in reference_ids:
             source = next((n for n in nodes if str(_dict(n).get("id") or "") == reference_id
-                           and _dict(n).get("type") == "source_part"), None)
-            if source is None or str(_dict(source).get("role") or "").lower() != "interface":
-                issues.append("DEVICE_ENVELOPE_COUNTERPART_SOURCE_NOT_FOUND:" + reference_id)
+                           and _dict(n).get("type") == "counterpart_reference"
+                           and str(_dict(n).get("assembly_role") or _dict(n).get("role") or "").upper()
+                           == "NON_PRINTABLE_COUNTERPART_REFERENCE"), None)
+            if source is None:
+                issues.append("DEVICE_ENVELOPE_COUNTERPART_GEOMETRY_NODE_NOT_FOUND:" + reference_id)
                 continue
             mesh = _dict(_dict(source).get("geometry_evidence")).get("mesh_brep")
             mesh = _dict(mesh)

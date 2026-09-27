@@ -56,8 +56,17 @@ def ready_device_envelope_contract():
     geometry["geometry_evidence"] = {"interface_mode": "DEVICE_ENVELOPE"}
     source = geometry["feature_graph"]["nodes"][0]
     source["role"] = "interface"
+    geometry["feature_graph"]["nodes"].insert(1, {
+        "id": "DEVICE_REFERENCE", "type": "counterpart_reference",
+        "assembly_role": "NON_PRINTABLE_COUNTERPART_REFERENCE",
+        "geometry_evidence": {"mesh_brep": {
+            "status": "ready", "strategy": "FACETED_MESH_BREP",
+            "encoding": "zlib_base64_json_v1", "payload": "counterpart-payload",
+            "triangle_count": 16,
+        }},
+    })
     geometry["feature_graph"]["nodes"].append({"id": "CRADLE", "type": "generated_geometry"})
-    geometry["feature_graph"]["nodes"][1].pop("source_part_id", None)
+    geometry["feature_graph"]["nodes"][2].pop("source_part_id", None)
     geometry["feature_graph"]["nodes"][1]["mode"] = "DEVICE_ENVELOPE"
     geometry.pop("interface_execution", None)
     geometry["interface_execution"] = {
@@ -74,7 +83,7 @@ def ready_device_envelope_contract():
         "status": "IDENTIFIED", "mode": "DEVICE_ENVELOPE",
         "assembly_role": "NON_PRINTABLE_COUNTERPART_REFERENCE",
         "export_policy": "EXCLUDE_FROM_PRINTABLE_OUTPUT",
-        "part_ids": ["CORE"],
+        "part_ids": ["DEVICE_REFERENCE"],
         "alignment": {
             "status": "ALIGNED", "confidence": "HIGH", "pose_unique": True, "solution_count": 1,
             "selected_transform_4x4": [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]],
@@ -134,10 +143,10 @@ class ProductGeometryContractTests(unittest.TestCase):
         self.assertEqual(blockers, ["INTERFACE_PRESERVING_REBUILD_EXECUTOR_NOT_IMPLEMENTED"])
 
         geometry = contract["product_geometry_contract"]
-        geometry["geometry_bindings"][0]["geometry_node_id"] = "CORE"
+        geometry["geometry_bindings"][0]["geometry_node_id"] = "DEVICE_REFERENCE"
         geometry["geometry_bindings"][0]["operation"] = "PRESERVE_SOURCE_GEOMETRY"
         blockers = interface_preserving_contract_issues(contract)
-        self.assertIn("DEVICE_ENVELOPE_REFERENCE_BOUND_AS_PRINTABLE_GEOMETRY:CORE", blockers)
+        self.assertIn("DEVICE_ENVELOPE_REFERENCE_BOUND_AS_PRINTABLE_GEOMETRY:DEVICE_REFERENCE", blockers)
 
     def test_device_envelope_ambiguous_pose_and_missing_export_policy_are_blocked(self):
         contract = ready_device_envelope_contract()
@@ -146,6 +155,13 @@ class ProductGeometryContractTests(unittest.TestCase):
         reference["alignment"]["selected_transform_4x4"] = None
         blockers = interface_preserving_contract_issues(contract)
         self.assertIn("DEVICE_ENVELOPE_ALIGNMENT_UNRESOLVED", blockers)
+
+        contract = ready_device_envelope_contract()
+        geometry = contract["product_geometry_contract"]
+        geometry["feature_graph"]["nodes"] = [n for n in geometry["feature_graph"]["nodes"] if n["id"] != "DEVICE_REFERENCE"]
+        geometry["interface_reference"]["part_ids"] = ["CORE"]
+        blockers = interface_preserving_contract_issues(contract)
+        self.assertIn("DEVICE_ENVELOPE_COUNTERPART_GEOMETRY_NODE_NOT_FOUND:CORE", blockers)
 
         contract = ready_device_envelope_contract()
         contract["product_geometry_contract"]["interface_reference"].pop("export_policy")
