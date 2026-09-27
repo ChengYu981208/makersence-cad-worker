@@ -8,6 +8,7 @@ from urllib.request import Request, urlopen
 from design_model_router import design_model_provider_status, route_design_model
 from product_geometry_contract import is_interface_preserving_scope, protected_rebuild_blockers
 from counterpart_arrangement import solve_instance_arrangement
+from counterpart_mesh import load_3mf_assembly_mesh
 
 import cadquery as cq
 from cadquery import exporters
@@ -4397,7 +4398,7 @@ def align_counterpart_urls(source_url,counterpart_url,relation="support",expecte
     try:expected_instances=max(1,min(12,int(expected_instances or 1)))
     except Exception:raise ValueError("counterpart expected_instances must be an integer from 1 to 12")
     sp,sbytes=_ca_download_3mf(source_url,"source");cp,cbytes=_ca_download_3mf(counterpart_url,"counterpart")
-    src=_ca_largest_mesh_3mf(sp);ctr=_ca_largest_mesh_3mf(cp)
+    src=load_3mf_assembly_mesh(sp);ctr=_ca_largest_mesh_3mf(cp)
     src_surface=_ca_surface_samples(src,12000);h=_ca_hash(src_surface,5.0);ctr_pts=_ca_point_samples(ctr,900)
     rotations=_ca_rotations()
     ranked=sorted([(round(_ca_orientation_affinity(src["bbox"]["dimensions"],_ca_rot_bbox(ctr["bbox"],m)),6),m) for m in rotations],key=lambda x:x[0])[:10]
@@ -4513,7 +4514,7 @@ def align_counterpart_urls(source_url,counterpart_url,relation="support",expecte
             "span_mm":round(max(pose_dims),3),
             "confidence":confidence,
             "transform":{"rotation_matrix":pose["rotation_matrix"],"translation_mm":pose["translation_mm"]},
-            "coordinate_frame":"source_largest_part_min_normalized",
+            "coordinate_frame":"source_assembly_min_normalized",
         })
     solution_rows=[]
     for row in distinct[:5]:
@@ -4529,7 +4530,7 @@ def align_counterpart_urls(source_url,counterpart_url,relation="support",expecte
       "expected_instances":instance_alignment["expected_instances"],"matched_instances":instance_alignment["matched_instances"],"instance_transforms":instance_alignment["instance_transforms"],"instance_solution_method":instance_alignment["instance_solution_method"],"instance_solution_complete":instance_alignment["instance_solution_complete"],"instance_arrangements":instance_alignment.get("candidate_arrangements",[]),"instance_interface_selections":instance_interface_selections,
       "transform":{"rotation_matrix":[[int(v) for v in rr] for rr in primary_m],"translation_mm":[round(x,3) for x in primary_t]},
       "metrics":{**met,"score_gap":round(gap,3),"orientation_affinity":best[4],"distinct_solution_count":len(distinct),"instance_arrangement":{"reason":instance_alignment.get("reason"),"separation_proof":instance_alignment.get("separation_proof"),"uniqueness_basis":instance_alignment.get("uniqueness_basis"),"candidate_arrangement_search_complete":instance_alignment.get("candidate_arrangement_search_complete"),"search_nodes":instance_alignment.get("search_nodes"),"supported_pose_count":instance_alignment.get("supported_pose_count"),"minimum_instance_gap_mm":instance_alignment.get("minimum_instance_gap_mm"),"score_gap":instance_alignment.get("arrangement_score_gap")},"checks":{"contact_support":contact_ok,"low_intrusion":intrusion_ok,"contact_span":span_ok,"single_pose_solution_unique":pose_uniqueness_ok,"solution_unique":uniqueness_ok,"instance_arrangement_complete":instance_alignment.get("instance_solution_complete",False)},"solutions":solution_rows},
-      "interface_selection":{"axis":"XYZ"[axis_i],"plane_mm":round(plane,3),"raw_source_plane_mm":round(raw_plane,3),"band_mm":round(band,3),"span_mm":round(max(cd),3),"confidence":confidence,"reason":"counterpart_geometry_contact_alignment_v1","coordinate_frame":"source_largest_part_min_normalized"},
+      "interface_selection":{"axis":"XYZ"[axis_i],"plane_mm":round(plane,3),"raw_source_plane_mm":round(raw_plane,3),"band_mm":round(band,3),"span_mm":round(max(cd),3),"confidence":confidence,"reason":"counterpart_geometry_contact_alignment_v1","coordinate_frame":"source_assembly_min_normalized"},
       "policy":"Fail closed unless measured counterpart geometry produces a low-intrusion, spatially distributed and sufficiently unique contact solution."
     }
 
@@ -4743,13 +4744,6 @@ def _startup_hybrid_smoke():
         needed={"model.stl","model.step","model.3mf","preview.glb"}
         provider_ev=(validation.get("blender_hybrid") or {})
         export_audit=validation.get("export_audit") or {}
-        smoke_ok=bool(
-          j.get("status")=="completed"
-          and needed.issubset(set(artifacts))
-          and validation.get("blender_hybrid_ok") is True
-          and str(provider_ev.get("mesh_brep_status") or "").lower()=="ready"
-          and export_audit.get("ok") is True
-        )
         failed_validation_gates=[]
         for key,value in validation.items():
             if value is False:
@@ -4763,6 +4757,15 @@ def _startup_hybrid_smoke():
                         if check_value is False:
                             failed_validation_gates.append(str(key)+"."+str(check_key))
         failed_validation_gates=sorted(set(failed_validation_gates))
+        smoke_ok=bool(
+          j.get("status")=="completed"
+          and needed.issubset(set(artifacts))
+          and validation.get("status")=="PASS"
+          and validation.get("blender_hybrid_ok") is True
+          and str(provider_ev.get("mesh_brep_status") or "").lower()=="ready"
+          and export_audit.get("ok") is True
+          and not failed_validation_gates
+        )
         result={
           "status":"PASS" if smoke_ok else "FAIL",
           "job_status":j.get("status"),
@@ -4794,7 +4797,7 @@ if __name__=="__main__":
         raise SystemExit(_counterpart_alignment_child_cli(sys.argv[2],sys.argv[3]))
     if len(sys.argv)>=4 and sys.argv[1]=="--motion-child":
         raise SystemExit(_motion_child_cli(sys.argv[2],sys.argv[3]))
-    print("MakerSence CAD Worker 2.61.0-design-model-router starting on",PORT,"Bambu Studio",BAMBU_VERSION,"available",bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),flush=True)
+    print("MakerSence CAD Worker 2.64.4-transform-aware-alignment starting on",PORT,"Bambu Studio",BAMBU_VERSION,"available",bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),flush=True)
     if str(os.environ.get("MAKERSENCE_HYBRID_SMOKE_ON_START","")).strip()=="1":
         threading.Thread(target=_startup_hybrid_smoke,daemon=True,name="makersence-hybrid-smoke").start()
     ThreadingHTTPServer(("0.0.0.0",PORT),Handler).serve_forever()
