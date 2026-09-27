@@ -4158,6 +4158,90 @@ def _ca_nearest(p,h,cell=5.0):
             if dd<bd:bd=dd;best=q
     return best,math.sqrt(bd) if best is not None else 99.0
 
+
+def _ca_triangle_records(mesh):
+    vv=mesh["vertices"];out=[]
+    for t in mesh["triangles"]:
+        try:a,b,c=vv[t[0]],vv[t[1]],vv[t[2]]
+        except:continue
+        ux=b[0]-a[0];uy=b[1]-a[1];uz=b[2]-a[2];vx=c[0]-a[0];vy=c[1]-a[1];vz=c[2]-a[2]
+        nx=uy*vz-uz*vy;ny=uz*vx-ux*vz;nz=ux*vy-uy*vx;ln=math.sqrt(nx*nx+ny*ny+nz*nz)
+        if ln<=1e-9:continue
+        out.append((a,b,c,(nx/ln,ny/ln,nz/ln)))
+    return out
+
+def _ca_triangle_hash(records,cell=6.0):
+    h={}
+    for idx,(a,b,c,n) in enumerate(records):
+        mn=[min(a[i],b[i],c[i]) for i in range(3)];mx=[max(a[i],b[i],c[i]) for i in range(3)]
+        lo=[math.floor(mn[i]/cell) for i in range(3)];hi=[math.floor(mx[i]/cell) for i in range(3)]
+        if any(hi[i]-lo[i]>4 for i in range(3)):
+            cen=[(a[i]+b[i]+c[i])/3 for i in range(3)];key=tuple(math.floor(cen[i]/cell) for i in range(3));h.setdefault(key,[]).append(idx);continue
+        for ix in range(lo[0],hi[0]+1):
+          for iy in range(lo[1],hi[1]+1):
+           for iz in range(lo[2],hi[2]+1):h.setdefault((ix,iy,iz),[]).append(idx)
+    return h
+
+def _ca_dot(a,b):return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]
+def _ca_sub(a,b):return [a[i]-b[i] for i in range(3)]
+def _ca_add(a,b):return [a[i]+b[i] for i in range(3)]
+def _ca_mul(a,s):return [a[i]*s for i in range(3)]
+
+def _ca_point_triangle(p,a,b,c):
+    ab=_ca_sub(b,a);ac=_ca_sub(c,a);ap=_ca_sub(p,a);d1=_ca_dot(ab,ap);d2=_ca_dot(ac,ap)
+    if d1<=0 and d2<=0:return a
+    bp=_ca_sub(p,b);d3=_ca_dot(ab,bp);d4=_ca_dot(ac,bp)
+    if d3>=0 and d4<=d3:return b
+    vc=d1*d4-d3*d2
+    if vc<=0 and d1>=0 and d3<=0:
+        v=d1/(d1-d3);return _ca_add(a,_ca_mul(ab,v))
+    cp=_ca_sub(p,c);d5=_ca_dot(ab,cp);d6=_ca_dot(ac,cp)
+    if d6>=0 and d5<=d6:return c
+    vb=d5*d2-d1*d6
+    if vb<=0 and d2>=0 and d6<=0:
+        w=d2/(d2-d6);return _ca_add(a,_ca_mul(ac,w))
+    va=d3*d6-d5*d4
+    if va<=0 and (d4-d3)>=0 and (d5-d6)>=0:
+        bc=_ca_sub(c,b);w=(d4-d3)/((d4-d3)+(d5-d6));return _ca_add(b,_ca_mul(bc,w))
+    den=1.0/max(1e-12,va+vb+vc);v=vb*den;w=vc*den
+    return _ca_add(a,_ca_add(_ca_mul(ab,v),_ca_mul(ac,w)))
+
+def _ca_exact_nearest(p,records,h,cell=6.0):
+    k=tuple(math.floor(p[i]/cell) for i in range(3));ids=set()
+    for dx in (-1,0,1):
+      for dy in (-1,0,1):
+       for dz in (-1,0,1):ids.update(h.get((k[0]+dx,k[1]+dy,k[2]+dz),()))
+    if not ids:return None,99.0,0.0
+    best=None;bd=1e30;bsd=0.0
+    for idx in ids:
+        a,b,c,n=records[idx];q=_ca_point_triangle(p,a,b,c);v=_ca_sub(p,q);dd=_ca_dot(v,v)
+        if dd<bd:bd=dd;best=q;bsd=_ca_dot(v,n)
+    return best,math.sqrt(bd),bsd
+
+def _ca_pose_score_exact(points,m,t,records,th,src_bbox,contact_mm=1.6,near_mm=3.5):
+    contact=[];near=0;intrude=0;dist_sum=0.0;transformed=[];support_up=0
+    for p0 in points:
+        r=_ca_apply_rot(p0,m);p=[r[i]+t[i] for i in range(3)];transformed.append(p)
+        q,d,sd=_ca_exact_nearest(p,records,th)
+        if q is None:continue
+        if d<=near_mm:
+            near+=1;dist_sum+=d
+            if d<=contact_mm:
+                contact.append(p)
+                if sd>=-.2:support_up+=1
+            if d<=2.5 and sd<-.65:intrude+=1
+    b=_ca_bbox(transformed);ov=[]
+    for i in range(3):
+        inter=max(0.0,min(b["max"][i],src_bbox["max"][i])-max(b["min"][i],src_bbox["min"][i]))
+        ov.append(inter/max(.001,min(b["dimensions"][i],src_bbox["dimensions"][i])))
+    c=len(contact);n=len(points);ir=intrude/max(1,near)
+    score=c*5.2+near*.55-intrude*7.0-(dist_sum/max(1,near))*1.4+sum(sorted(ov,reverse=True)[:2])*7.0
+    if c:
+        cb=_ca_bbox(contact);span=cb["dimensions"];height=(sum(p[2] for p in contact)/c-src_bbox["min"][2])/max(.001,src_bbox["dimensions"][2])
+    else:cb={"min":[0,0,0],"max":[0,0,0],"dimensions":[0,0,0]};span=[0,0,0];height=0
+    span_good=sum(1 for i,x in enumerate(span) if x>=max(4.0,src_bbox["dimensions"][i]*.06));score+=span_good*9.0
+    return {"score":round(score,4),"contact_count":c,"sample_count":n,"contact_ratio":round(c/max(1,n),4),"near_ratio":round(near/max(1,n),4),"intrusion_ratio":round(ir,4),"contact_bbox_mm":{"min":[round(x,3) for x in cb["min"]],"max":[round(x,3) for x in cb["max"]],"dimensions":[round(x,3) for x in span]},"pose_bbox_mm":{"min":[round(x,3) for x in b["min"]],"max":[round(x,3) for x in b["max"]],"dimensions":[round(x,3) for x in b["dimensions"]]},"axis_overlap_ratio":[round(x,3) for x in ov],"contact_height_ratio":round(height,4),"nonnegative_contact_ratio":round(support_up/max(1,c),4),"distance_mode":"EXACT_POINT_TRIANGLE"}
+
 def _ca_pose_score(points,m,t,h,src_bbox,contact_mm=1.8,near_mm=4.0):
     contact=[];near=0;intrude=0;dist_sum=0.0
     transformed=[]
@@ -4228,9 +4312,15 @@ def align_counterpart_urls(source_url,counterpart_url,relation="support"):
          t=[t0[0]+dx,t0[1]+dy,t0[2]+dz];met=_ca_pose_score(ctr_pts,m,t,h,src["bbox"])
          refined.append((met["score"]-aff*6.0,m,t,met,aff))
     refined.sort(key=lambda x:x[0],reverse=True)
-    best=refined[0] if refined else coarse[0]
+    exact_records=_ca_triangle_records(src);exact_hash=_ca_triangle_hash(exact_records,6.0)
+    exact_rows=[]
+    for row in refined[:60]:
+        em=_ca_pose_score_exact(ctr_pts,row[1],row[2],exact_records,exact_hash,src["bbox"])
+        exact_rows.append((em["score"]-row[4]*6.0,row[1],row[2],em,row[4]))
+    exact_rows.sort(key=lambda x:x[0],reverse=True)
+    best=exact_rows[0] if exact_rows else (refined[0] if refined else coarse[0])
     distinct=[]
-    for row in refined[:250]:
+    for row in exact_rows[:60] if exact_rows else refined[:250]:
         if not distinct:distinct.append(row);continue
         if all(math.dist(row[2],q[2])>5.0 or row[1]!=q[1] for q in distinct):
             distinct.append(row)
@@ -4311,7 +4401,7 @@ def _u_cad_evidence_binding_selftest():
     return {"status":"PASS" if all(checks.values()) else "FAIL","checks":checks,"bindings":binding_rows,"removed_volume_mm3":round(removed,3),"expected_removed_volume_mm3":round(expected,3)}
 
 class Handler(BaseHTTPRequestHandler):
-    server_version="MakerSenceCAD/2.63.1-counterpart-alignment-solutions"
+    server_version="MakerSenceCAD/2.64.0-counterpart-exact-alignment"
     def log_message(self,fmt,*args):print(fmt%args,flush=True)
     def send_json(self,code,obj):
         data=json.dumps(obj,ensure_ascii=False).encode("utf-8")
@@ -4327,7 +4417,7 @@ class Handler(BaseHTTPRequestHandler):
         return True
     def do_GET(self):
         path=urlparse(self.path).path
-        if path=="/health":return self.send_json(200,{"ok":True,"service":"makersence-cad-worker","version":"2.63.1-counterpart-alignment-solutions","engine":"cadquery+blender+svgpathtools+shapely+pillow","blender":{"available":pathlib.Path(BLENDER_BIN).exists(),"binary":BLENDER_BIN},"bambu_slicer":{"available":bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),"engine":"Bambu Studio","version":BAMBU_VERSION},"design_model_provider":design_model_provider_status(),"capabilities":["compact_step_brep","bambu_native_parts","detachable_parts","assembly_render","product_dimensions","open_edges_zero_gate","formal_mesh_render","artifact_reaudit","rectangular_blind_pockets","geometry_intent_gate","orphan_geometry_gate","unintended_through_cut_gate","welded_3mf_meshes","exported_3mf_topology_gate","true_font_outline_text","high_smooth_vector_mesh","multilingual_font_fallback","actual_text_stroke_gate","adaptive_cjk_regular_first","cjk_internal_clearance_gate","cjk_counter_preservation_gate","text_mesh_topology_candidate_gate","remote_3mf_stream_analyzer","remote_3mf_xml_iterparse","remote_3mf_transform_aware_bounds","remote_3mf_cad_drawing_v1","remote_3mf_reconstruction_sections_v2","auto_hole_slot_detection","blind_cavity_detection_v1","planar_face_cluster_locator_v1","cavity_bottom_face_match_v1","residual_wall_normal_distance_v1","paired_plane_thickness_v1","bounded_per_part_feature_scan_v1","auto_fillet_chamfer_candidates","auto_section_view_plan","multipart_dimension_semantics","supplementary_stl_step_analyzer","remote_source_url_analyzer_v1","counterpart_alignment_v1","generic_memory_budget_v1","streaming_3mf_glb_export","source_3mf_glb_preview_v1","world_space_feature_center_v1","auto_text_boldening","typography_layout_bounds","script_aware_glyph_spacing","glyph_clearance_gate","text_readability_gate","bambu_04_text_profile","text_slicer_no_merge_gate","separate_structural_text_min_feature","arachne_text_project_settings","bambu_cli_real_slice","gcode_3mf_toolpath_gate","print_ready_plate_3mf","plate_part_coverage_gate","universal_cad_recipe_v2","cad_evidence_parametric_binding_v1","blind_cavity_recipe_cut_v1","planar_design_fidelity_artifact_gate_v1","universal_design_fidelity_artifact_gate_v1","section_loft_reconstruction_v1","section_loft_open_cavity_v2","multipart_relation_rebuild_v1","per_part_reconstruction_evidence_v1","planar_multiloop_extrusion_v1","planar_mesh_projection_fallback_v1","bambu_assembly_metadata_evidence_v1","assembly_pose_solver_v1","assembly_pose_solver_v3","mechanism_pose_brep_probe_v1","mechanism_motion_solver_v1","mechanism_motion_solver_v2","mechanism_motion_solver_v3","hinge_sweep_collision_gate_v1","terminal_stop_refinement_v1","latch_relative_pivot_engagement_v1","motion_bbox_prefilter_v1","motion_memory_checkpoint_v1","motion_exact_separation_prefilter_v1","motion_fail_closed_collision_v1","motion_early_direction_exit_v1","motion_isolated_subprocess_v1","motion_timeout_guard_v1","async_motion_jobs_v1","separate_part_mate_resolver_v1","planar_ring_opening_match_v1","faceted_mesh_brep_v1","complex_topology_mesh_fallback_v1","sealed_internal_cavity_mesh_fallback_v1","multipart_dimension_semantics_v2","source_intended_contact_qa_v1","same_root_assembly_guard_v1","axisymmetric_revolve_reconstruction_v1","bounded_inprocess_universal_jobs_v1","planar_prismatic_reconstruction_v1","commercial_visual_release_gate_v1","fail_closed_family_router_v1","svg_profile_extrusion_v1","formal_geometry_only_render_v1","text_08mm_baseline_v1","generic_blender_profile_executor_v1","generic_blender_to_cad_brep_v1","design_model_provider_router_v1","modal_triposg_provider_v1",],"profiles":["bambu_a1_mini_04"],"universal_executor_probe":{"cavity_loft_policy":UNIVERSAL_CAVITY_LOFT_POLICY,"loft_argcount":_u_loft_from_loops.__code__.co_argcount}})
+        if path=="/health":return self.send_json(200,{"ok":True,"service":"makersence-cad-worker","version":"2.64.0-counterpart-exact-alignment","engine":"cadquery+blender+svgpathtools+shapely+pillow","blender":{"available":pathlib.Path(BLENDER_BIN).exists(),"binary":BLENDER_BIN},"bambu_slicer":{"available":bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),"engine":"Bambu Studio","version":BAMBU_VERSION},"design_model_provider":design_model_provider_status(),"capabilities":["compact_step_brep","bambu_native_parts","detachable_parts","assembly_render","product_dimensions","open_edges_zero_gate","formal_mesh_render","artifact_reaudit","rectangular_blind_pockets","geometry_intent_gate","orphan_geometry_gate","unintended_through_cut_gate","welded_3mf_meshes","exported_3mf_topology_gate","true_font_outline_text","high_smooth_vector_mesh","multilingual_font_fallback","actual_text_stroke_gate","adaptive_cjk_regular_first","cjk_internal_clearance_gate","cjk_counter_preservation_gate","text_mesh_topology_candidate_gate","remote_3mf_stream_analyzer","remote_3mf_xml_iterparse","remote_3mf_transform_aware_bounds","remote_3mf_cad_drawing_v1","remote_3mf_reconstruction_sections_v2","auto_hole_slot_detection","blind_cavity_detection_v1","planar_face_cluster_locator_v1","cavity_bottom_face_match_v1","residual_wall_normal_distance_v1","paired_plane_thickness_v1","bounded_per_part_feature_scan_v1","auto_fillet_chamfer_candidates","auto_section_view_plan","multipart_dimension_semantics","supplementary_stl_step_analyzer","remote_source_url_analyzer_v1","counterpart_alignment_v1","counterpart_exact_surface_distance_v1","generic_memory_budget_v1","streaming_3mf_glb_export","source_3mf_glb_preview_v1","world_space_feature_center_v1","auto_text_boldening","typography_layout_bounds","script_aware_glyph_spacing","glyph_clearance_gate","text_readability_gate","bambu_04_text_profile","text_slicer_no_merge_gate","separate_structural_text_min_feature","arachne_text_project_settings","bambu_cli_real_slice","gcode_3mf_toolpath_gate","print_ready_plate_3mf","plate_part_coverage_gate","universal_cad_recipe_v2","cad_evidence_parametric_binding_v1","blind_cavity_recipe_cut_v1","planar_design_fidelity_artifact_gate_v1","universal_design_fidelity_artifact_gate_v1","section_loft_reconstruction_v1","section_loft_open_cavity_v2","multipart_relation_rebuild_v1","per_part_reconstruction_evidence_v1","planar_multiloop_extrusion_v1","planar_mesh_projection_fallback_v1","bambu_assembly_metadata_evidence_v1","assembly_pose_solver_v1","assembly_pose_solver_v3","mechanism_pose_brep_probe_v1","mechanism_motion_solver_v1","mechanism_motion_solver_v2","mechanism_motion_solver_v3","hinge_sweep_collision_gate_v1","terminal_stop_refinement_v1","latch_relative_pivot_engagement_v1","motion_bbox_prefilter_v1","motion_memory_checkpoint_v1","motion_exact_separation_prefilter_v1","motion_fail_closed_collision_v1","motion_early_direction_exit_v1","motion_isolated_subprocess_v1","motion_timeout_guard_v1","async_motion_jobs_v1","separate_part_mate_resolver_v1","planar_ring_opening_match_v1","faceted_mesh_brep_v1","complex_topology_mesh_fallback_v1","sealed_internal_cavity_mesh_fallback_v1","multipart_dimension_semantics_v2","source_intended_contact_qa_v1","same_root_assembly_guard_v1","axisymmetric_revolve_reconstruction_v1","bounded_inprocess_universal_jobs_v1","planar_prismatic_reconstruction_v1","commercial_visual_release_gate_v1","fail_closed_family_router_v1","svg_profile_extrusion_v1","formal_geometry_only_render_v1","text_08mm_baseline_v1","generic_blender_profile_executor_v1","generic_blender_to_cad_brep_v1","design_model_provider_router_v1","modal_triposg_provider_v1",],"profiles":["bambu_a1_mini_04"],"universal_executor_probe":{"cavity_loft_policy":UNIVERSAL_CAVITY_LOFT_POLICY,"loft_argcount":_u_loft_from_loops.__code__.co_argcount}})
         if path=="/v1/selftest/face-evidence":
             if not self.authorized():return
             return self.send_json(200,_dw_face_evidence_selftest())
