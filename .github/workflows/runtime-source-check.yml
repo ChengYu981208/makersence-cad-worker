@@ -24,6 +24,7 @@ jobs:
         run: |
           python -m py_compile runtime/heavy/app.py
           python -m py_compile runtime/heavy/design_model_router.py
+          python -m py_compile runtime/heavy/product_geometry_contract.py
           python -m py_compile integrations/modal_triposg/app.py
           python -m py_compile runtime/cad-core-v5/app.py
           python -m py_compile runtime/slicer/app.py

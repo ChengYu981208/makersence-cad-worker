@@ -6,6 +6,7 @@ from urllib.parse import urlparse, parse_qs
 from urllib.request import Request, urlopen
 
 from design_model_router import design_model_provider_status, route_design_model
+from product_geometry_contract import is_interface_preserving_scope, protected_rebuild_blockers
 
 import cadquery as cq
 from cadquery import exporters
@@ -1352,6 +1353,9 @@ def _hybrid_apply_functional_core(shape,c):
     return cut,meta
 
 def design_model_hybrid(c,req):
+    if is_interface_preserving_scope(c):
+        blockers=protected_rebuild_blockers(c)
+        raise ValueError("INTERFACE_PRESERVING_REBUILD_BLOCKED:"+",".join(blockers))
     dm=c.get("design_model") or {}
     image_url=str(dm.get("source_image_url") or "")
     if not re.match(r"^https://",image_url,re.I):raise ValueError("DESIGN_MODEL_HYBRID_IMAGE_URL_REQUIRED")
