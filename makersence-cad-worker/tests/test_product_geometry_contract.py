@@ -92,3 +92,37 @@ class ProductGeometryContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+    def test_protected_hybrid_request_stops_before_external_provider(self):
+        import importlib.util
+        import types
+
+        heavy_dir = Path(__file__).resolve().parents[1] / "runtime" / "heavy"
+        if str(heavy_dir) not in sys.path:
+            sys.path.insert(0, str(heavy_dir))
+        if "svgpathtools" not in sys.modules:
+            svg_stub = types.ModuleType("svgpathtools")
+            svg_stub.parse_path = lambda _path: None
+            sys.modules["svgpathtools"] = svg_stub
+        spec = importlib.util.spec_from_file_location("makersence_heavy_contract_test", heavy_dir / "app.py")
+        runtime = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runtime)
+        provider_calls = []
+        runtime.route_design_model = lambda payload: provider_calls.append(payload)
+        contract = {
+            "design_scope_contract": {
+                "protect_mating_interface": True,
+                "execution": {"required_capability": "interface_preserving_exterior_rebuild_v1", "available": False, "ready": False},
+            },
+            "product_geometry_contract": {
+                "status": "READY_FOR_INTERFACE_ENGINE", "executor_ready": False,
+                "required_capabilities": ["interface_preserving_exterior_rebuild_v1"],
+                "hard_blockers": ["feature_geometry_mapping_incomplete:zone:device_contact_cradle"],
+                "feature_graph": {"nodes": []},
+            },
+            "design_model": {"source_image_url": "https://example.com/approved.png", "concept_approved": True},
+        }
+        with self.assertRaisesRegex(ValueError, "INTERFACE_PRESERVING_REBUILD_BLOCKED"):
+            runtime.design_model_hybrid(contract, {})
+        self.assertEqual(provider_calls, [])
