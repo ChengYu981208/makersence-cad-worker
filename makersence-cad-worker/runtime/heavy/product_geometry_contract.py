@@ -105,26 +105,66 @@ def interface_preserving_contract_issues(contract: Any) -> list[str]:
 
     nodes = _list(_dict(geometry.get("feature_graph")).get("nodes"))
     execution = _dict(geometry.get("interface_execution"))
+    mode = str(_dict(geometry.get("geometry_evidence")).get("interface_mode") or scope.get("interface_mode") or "").upper()
     core = _dict(execution.get("protected_core"))
     core_id = str(core.get("part_id") or "")
-    if core.get("preserve_source_geometry") is not True or not core_id:
-        issues.append("PROTECTED_SOURCE_CORE_BINDING_MISSING")
-    source = next((n for n in nodes if str(_dict(n).get("id") or "") == core_id and _dict(n).get("type") == "source_part"), None)
-    if source is None:
-        issues.append("PROTECTED_SOURCE_PART_NOT_FOUND")
-    else:
-        mesh = _dict(_dict(source).get("geometry_evidence")).get("mesh_brep")
-        mesh = _dict(mesh)
-        if (str(mesh.get("status") or "").lower() != "ready"
-                or str(mesh.get("strategy") or "") != "FACETED_MESH_BREP"
-                or str(mesh.get("encoding") or "") != "zlib_base64_json_v1"
-                or not isinstance(mesh.get("payload"), str) or not mesh.get("payload")
-                or (_number(mesh.get("triangle_count")) or 0) < 4):
-            issues.append("PROTECTED_SOURCE_MESH_BREP_INVALID")
     protected_node = next((n for n in nodes if _dict(n).get("type") == "protected_interface"
                            and str(_dict(n).get("operation") or "").upper() == "PRESERVE"), None)
-    if protected_node is None or str(_dict(protected_node).get("source_part_id") or "") != core_id:
-        issues.append("PROTECTED_INTERFACE_SOURCE_LINK_MISSING")
+
+    if mode == "DEVICE_ENVELOPE":
+        reference = _dict(geometry.get("interface_reference"))
+        reference_ids = {str(x) for x in _list(reference.get("part_ids")) if str(x)}
+        if (str(reference.get("status") or "").upper() != "IDENTIFIED"
+                or reference.get("assembly_role") != "NON_PRINTABLE_COUNTERPART_REFERENCE"
+                or reference.get("export_policy") != "EXCLUDE_FROM_PRINTABLE_OUTPUT"
+                or not reference_ids):
+            issues.append("DEVICE_ENVELOPE_REFERENCE_CLASSIFICATION_INVALID")
+        if core_id and core_id in reference_ids:
+            issues.append("DEVICE_ENVELOPE_COUNTERPART_MUST_NOT_BE_PRINTED")
+        for reference_id in reference_ids:
+            source = next((n for n in nodes if str(_dict(n).get("id") or "") == reference_id
+                           and _dict(n).get("type") == "source_part"), None)
+            if source is None or str(_dict(source).get("role") or "").lower() != "interface":
+                issues.append("DEVICE_ENVELOPE_COUNTERPART_SOURCE_NOT_FOUND:" + reference_id)
+                continue
+            mesh = _dict(_dict(source).get("geometry_evidence")).get("mesh_brep")
+            mesh = _dict(mesh)
+            if (str(mesh.get("status") or "").lower() != "ready"
+                    or str(mesh.get("strategy") or "") != "FACETED_MESH_BREP"
+                    or str(mesh.get("encoding") or "") != "zlib_base64_json_v1"
+                    or not isinstance(mesh.get("payload"), str) or not mesh.get("payload")
+                    or (_number(mesh.get("triangle_count")) or 0) < 4):
+                issues.append("DEVICE_ENVELOPE_COUNTERPART_MESH_INVALID:" + reference_id)
+        if protected_node is None or str(_dict(protected_node).get("mode") or "").upper() != "DEVICE_ENVELOPE":
+            issues.append("DEVICE_ENVELOPE_PROTECTED_INTERFACE_LINK_MISSING")
+        alignment = _dict(reference.get("alignment"))
+        transform = alignment.get("selected_transform_4x4")
+        if (alignment.get("pose_unique") is not True or str(alignment.get("status") or "").upper() != "ALIGNED"
+                or str(alignment.get("confidence") or "").upper() != "HIGH" or not _valid_transform(transform)):
+            issues.append("DEVICE_ENVELOPE_ALIGNMENT_UNRESOLVED")
+        fit = _dict(reference.get("fit"))
+        clearance = _number(fit.get("xy_clearance_mm"))
+        if clearance is None or clearance <= 0:
+            issues.append("DEVICE_ENVELOPE_CLEARANCE_UNRESOLVED")
+        if fit.get("physical_validation_required") is not True:
+            issues.append("DEVICE_ENVELOPE_PHYSICAL_FIT_VALIDATION_MUST_REMAIN_REQUIRED")
+    else:
+        if core.get("preserve_source_geometry") is not True or not core_id:
+            issues.append("PROTECTED_SOURCE_CORE_BINDING_MISSING")
+        source = next((n for n in nodes if str(_dict(n).get("id") or "") == core_id and _dict(n).get("type") == "source_part"), None)
+        if source is None:
+            issues.append("PROTECTED_SOURCE_PART_NOT_FOUND")
+        else:
+            mesh = _dict(_dict(source).get("geometry_evidence")).get("mesh_brep")
+            mesh = _dict(mesh)
+            if (str(mesh.get("status") or "").lower() != "ready"
+                    or str(mesh.get("strategy") or "") != "FACETED_MESH_BREP"
+                    or str(mesh.get("encoding") or "") != "zlib_base64_json_v1"
+                    or not isinstance(mesh.get("payload"), str) or not mesh.get("payload")
+                    or (_number(mesh.get("triangle_count")) or 0) < 4):
+                issues.append("PROTECTED_SOURCE_MESH_BREP_INVALID")
+        if protected_node is None or str(_dict(protected_node).get("source_part_id") or "") != core_id:
+            issues.append("PROTECTED_INTERFACE_SOURCE_LINK_MISSING")
 
     bindings = _list(geometry.get("geometry_bindings"))
     def matching_binding(key: str, value: str) -> dict | None:
