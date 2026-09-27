@@ -53,11 +53,11 @@ class ThreeMFAssemblyMeshTests(unittest.TestCase):
             load_3mf_assembly_mesh(self.make_model(), max_triangles=4)
 
     def test_buildless_model_uses_unreferenced_component_roots(self):
-        xml = MODEL.replace("<build><item objectid=\\"3\\"/></build>", "<build/>")
+        xml = MODEL.replace('<build><item objectid="3"/></build>', '<build/>')
         mesh = load_3mf_assembly_mesh(self.make_model(xml))
         self.assertEqual(mesh["assembly"]["root_count"], 1)
         self.assertEqual(mesh["assembly"]["part_instance_count"], 2)
-        self.assertEqual(mesh["bbox"]["max"], [30.0, 10.0, 0.0])
+        self.assertEqual(mesh["bbox"]["max"], [30.0, 10.0, 10.0])
 
 
 if __name__ == "__main__":
