@@ -2,3 +2,4 @@ cadquery
 svgpathtools
 shapely
 pillow
+manifold3d==3.5.3
