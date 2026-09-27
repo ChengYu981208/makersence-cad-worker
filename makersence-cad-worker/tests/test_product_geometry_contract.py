@@ -67,7 +67,7 @@ def ready_device_envelope_contract():
     })
     geometry["feature_graph"]["nodes"].append({"id": "CRADLE", "type": "generated_geometry"})
     geometry["feature_graph"]["nodes"][2].pop("source_part_id", None)
-    geometry["feature_graph"]["nodes"][1]["mode"] = "DEVICE_ENVELOPE"
+    geometry["feature_graph"]["nodes"][2]["mode"] = "DEVICE_ENVELOPE"
     geometry.pop("interface_execution", None)
     geometry["interface_execution"] = {
         "exterior_shell_registration": {
