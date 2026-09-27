@@ -7,6 +7,7 @@ from urllib.request import Request, urlopen
 
 from design_model_router import design_model_provider_status, route_design_model
 from product_geometry_contract import is_interface_preserving_scope, protected_rebuild_blockers
+from counterpart_arrangement import solve_instance_arrangement
 
 import cadquery as cq
 from cadquery import exporters
@@ -4374,7 +4375,7 @@ def align_counterpart_urls(source_url,counterpart_url,relation="support",expecte
         key=tuple(round(x/4.0) for x in row[2])+(tuple(int(v) for rr in row[1] for v in rr),)
         if key in seen:continue
         seen.add(key);seeds.append(row)
-        if len(seeds)>=6:break
+        if len(seeds)>=(14 if expected_instances>1 else 6):break
     refined=[]
     offsets=(-9,-6,-3,0,3,6,9)
     for base,m,t0,met0,aff in seeds:
@@ -4386,7 +4387,7 @@ def align_counterpart_urls(source_url,counterpart_url,relation="support",expecte
     refined.sort(key=lambda x:x[0],reverse=True)
     exact_records=_ca_triangle_records(src);exact_hash=_ca_triangle_hash(exact_records,6.0)
     exact_rows=[]
-    for row in refined[:60]:
+    for row in refined[:(150 if expected_instances>1 else 60)]:
         em=_ca_pose_score_exact(ctr_pts,row[1],row[2],exact_records,exact_hash,src["bbox"])
         exact_rows.append((em["score"]-row[4]*6.0,row[1],row[2],em,row[4]))
     exact_rows.sort(key=lambda x:x[0],reverse=True)
@@ -4404,14 +4405,67 @@ def align_counterpart_urls(source_url,counterpart_url,relation="support",expecte
     contact_ok=met.get("contact_count",0)>=max(14,int(len(ctr_pts)*.018))
     intrusion_ok=met.get("intrusion_ratio",1)<=.22
     span_ok=span_axes>=2
-    uniqueness_ok=second is None or gap>=max(8.0,abs(best[0])*.035)
-    confidence="HIGH" if contact_ok and intrusion_ok and span_ok and uniqueness_ok else ("MEDIUM" if contact_ok and intrusion_ok and span_ok else "LOW")
-    instance_alignment=_ca_instance_alignment_evidence(expected_instances,confidence,{"rotation_matrix":[[int(v) for v in rr] for rr in best[1]],"translation_mm":[round(x,3) for x in best[2]]})
+    pose_uniqueness_ok=second is None or gap>=max(8.0,abs(best[0])*.035)
+    if expected_instances>1:
+        alignment_candidates=[]
+        for row in exact_rows:
+            mm=row[3]
+            alignment_candidates.append({
+                "score":row[0],
+                "rotation_matrix":[[int(v) for v in rr] for rr in row[1]],
+                "translation_mm":[round(x,3) for x in row[2]],
+                "contact_count":mm.get("contact_count"),
+                "sample_count":mm.get("sample_count"),
+                "intrusion_ratio":mm.get("intrusion_ratio"),
+                "contact_bbox_mm":mm.get("contact_bbox_mm"),
+                "pose_bbox_mm":mm.get("pose_bbox_mm"),
+                "pose_metrics":mm,
+            })
+        instance_alignment=solve_instance_arrangement(
+            alignment_candidates,expected_instances,
+            source_dimensions_mm=src["bbox"]["dimensions"],
+            minimum_contact_count=max(14,int(len(ctr_pts)*.018)),
+            minimum_gap_mm=0.0,
+            maximum_intrusion_ratio=.22,
+        )
+        confidence=instance_alignment["confidence"]
+        uniqueness_ok=instance_alignment["arrangement_unique"]
+    else:
+        confidence="HIGH" if contact_ok and intrusion_ok and span_ok and pose_uniqueness_ok else ("MEDIUM" if contact_ok and intrusion_ok and span_ok else "LOW")
+        uniqueness_ok=pose_uniqueness_ok
+        instance_alignment=_ca_instance_alignment_evidence(expected_instances,confidence,{"rotation_matrix":[[int(v) for v in rr] for rr in best[1]],"translation_mm":[round(x,3) for x in best[2]]})
+    selected_instances=instance_alignment.get("instance_transforms") or []
+    if selected_instances:
+        primary=selected_instances[0]
+        primary_m=primary["rotation_matrix"]
+        primary_t=primary["translation_mm"]
+        met=primary.get("pose_metrics") or met
+    else:
+        primary_m=best[1]
+        primary_t=best[2]
     cbox=met.get("contact_bbox_mm") or {};cd=cbox.get("dimensions") or [0,0,0]
     axis_i=min(range(3),key=lambda i:cd[i] if cd[i]>0 else 1e9)
     raw_plane=((cbox.get("min") or [0,0,0])[axis_i]+(cbox.get("max") or [0,0,0])[axis_i])/2
     plane=raw_plane-src["bbox"]["min"][axis_i]
     band=max(2.4,min(14.0,(cd[axis_i] if cd[axis_i]>0 else 4.0)+2.0))
+    instance_interface_selections=[]
+    for index,pose in enumerate(selected_instances):
+        pose_metrics=pose.get("pose_metrics") or (met if index==0 else {})
+        pose_box=pose_metrics.get("contact_bbox_mm") or {}
+        pose_dims=pose_box.get("dimensions") or [0,0,0]
+        pose_axis=min(range(3),key=lambda i:pose_dims[i] if pose_dims[i]>0 else 1e9)
+        pose_raw=((pose_box.get("min") or [0,0,0])[pose_axis]+(pose_box.get("max") or [0,0,0])[pose_axis])/2
+        instance_interface_selections.append({
+            "instance_index":index,
+            "axis":"XYZ"[pose_axis],
+            "plane_mm":round(pose_raw-src["bbox"]["min"][pose_axis],3),
+            "raw_source_plane_mm":round(pose_raw,3),
+            "band_mm":round(max(2.4,min(14.0,(pose_dims[pose_axis] if pose_dims[pose_axis]>0 else 4.0)+2.0)),3),
+            "span_mm":round(max(pose_dims),3),
+            "confidence":confidence,
+            "transform":{"rotation_matrix":pose["rotation_matrix"],"translation_mm":pose["translation_mm"]},
+            "coordinate_frame":"source_largest_part_min_normalized",
+        })
     solution_rows=[]
     for row in distinct[:5]:
         mm=row[3];cb=mm.get("contact_bbox_mm") or {};cc=[((cb.get("min") or [0,0,0])[i]+(cb.get("max") or [0,0,0])[i])/2 for i in range(3)]
@@ -4423,9 +4477,9 @@ def align_counterpart_urls(source_url,counterpart_url,relation="support",expecte
       "relation":str(relation or "support"),
       "source":{"name":src.get("name"),"dimensions_mm":[round(x,3) for x in src["bbox"]["dimensions"]],"triangle_count":len(src["triangles"]),"file_size_bytes":sbytes},
       "counterpart":{"name":ctr.get("name"),"dimensions_mm":[round(x,3) for x in ctr["bbox"]["dimensions"]],"triangle_count":len(ctr["triangles"]),"file_size_bytes":cbytes,"identity":{k:str((counterpart_context or {}).get(k) or "")[:160] for k in ("model_id","profile_id","instance_id") if (counterpart_context or {}).get(k)},"geometry_evidence":{"mesh_brep":_ca_counterpart_mesh_evidence(ctr)}},
-      "expected_instances":instance_alignment["expected_instances"],"matched_instances":instance_alignment["matched_instances"],"instance_transforms":instance_alignment["instance_transforms"],"instance_solution_method":instance_alignment["instance_solution_method"],"instance_solution_complete":instance_alignment["instance_solution_complete"],
-      "transform":{"rotation_matrix":[[int(v) for v in rr] for rr in best[1]],"translation_mm":[round(x,3) for x in best[2]]},
-      "metrics":{**met,"score_gap":round(gap,3),"orientation_affinity":best[4],"distinct_solution_count":len(distinct),"checks":{"contact_support":contact_ok,"low_intrusion":intrusion_ok,"contact_span":span_ok,"solution_unique":uniqueness_ok},"solutions":solution_rows},
+      "expected_instances":instance_alignment["expected_instances"],"matched_instances":instance_alignment["matched_instances"],"instance_transforms":instance_alignment["instance_transforms"],"instance_solution_method":instance_alignment["instance_solution_method"],"instance_solution_complete":instance_alignment["instance_solution_complete"],"instance_arrangements":instance_alignment.get("candidate_arrangements",[]),"instance_interface_selections":instance_interface_selections,
+      "transform":{"rotation_matrix":[[int(v) for v in rr] for rr in primary_m],"translation_mm":[round(x,3) for x in primary_t]},
+      "metrics":{**met,"score_gap":round(gap,3),"orientation_affinity":best[4],"distinct_solution_count":len(distinct),"instance_arrangement":{"reason":instance_alignment.get("reason"),"separation_proof":instance_alignment.get("separation_proof"),"uniqueness_basis":instance_alignment.get("uniqueness_basis"),"candidate_arrangement_search_complete":instance_alignment.get("candidate_arrangement_search_complete"),"search_nodes":instance_alignment.get("search_nodes"),"supported_pose_count":instance_alignment.get("supported_pose_count"),"minimum_instance_gap_mm":instance_alignment.get("minimum_instance_gap_mm"),"score_gap":instance_alignment.get("arrangement_score_gap")},"checks":{"contact_support":contact_ok,"low_intrusion":intrusion_ok,"contact_span":span_ok,"single_pose_solution_unique":pose_uniqueness_ok,"solution_unique":uniqueness_ok,"instance_arrangement_complete":instance_alignment.get("instance_solution_complete",False)},"solutions":solution_rows},
       "interface_selection":{"axis":"XYZ"[axis_i],"plane_mm":round(plane,3),"raw_source_plane_mm":round(raw_plane,3),"band_mm":round(band,3),"span_mm":round(max(cd),3),"confidence":confidence,"reason":"counterpart_geometry_contact_alignment_v1","coordinate_frame":"source_largest_part_min_normalized"},
       "policy":"Fail closed unless measured counterpart geometry produces a low-intrusion, spatially distributed and sufficiently unique contact solution."
     }
@@ -4475,7 +4529,7 @@ def _u_cad_evidence_binding_selftest():
     return {"status":"PASS" if all(checks.values()) else "FAIL","checks":checks,"bindings":binding_rows,"removed_volume_mm3":round(removed,3),"expected_removed_volume_mm3":round(expected,3)}
 
 class Handler(BaseHTTPRequestHandler):
-    server_version="MakerSenceCAD/2.64.1-counterpart-reference-mesh"
+    server_version="MakerSenceCAD/2.64.2-multi-instance-arrangement"
     def log_message(self,fmt,*args):print(fmt%args,flush=True)
     def send_json(self,code,obj):
         data=json.dumps(obj,ensure_ascii=False).encode("utf-8")
@@ -4491,7 +4545,7 @@ class Handler(BaseHTTPRequestHandler):
         return True
     def do_GET(self):
         path=urlparse(self.path).path
-        if path=="/health":return self.send_json(200,{"ok":True,"service":"makersence-cad-worker","version":"2.64.1-counterpart-reference-mesh","engine":"cadquery+blender+svgpathtools+shapely+pillow","blender":{"available":pathlib.Path(BLENDER_BIN).exists(),"binary":BLENDER_BIN},"bambu_slicer":{"available":bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),"engine":"Bambu Studio","version":BAMBU_VERSION},"design_model_provider":design_model_provider_status(),"capabilities":["compact_step_brep","bambu_native_parts","detachable_parts","assembly_render","product_dimensions","open_edges_zero_gate","formal_mesh_render","artifact_reaudit","rectangular_blind_pockets","geometry_intent_gate","orphan_geometry_gate","unintended_through_cut_gate","welded_3mf_meshes","exported_3mf_topology_gate","true_font_outline_text","high_smooth_vector_mesh","multilingual_font_fallback","actual_text_stroke_gate","adaptive_cjk_regular_first","cjk_internal_clearance_gate","cjk_counter_preservation_gate","text_mesh_topology_candidate_gate","remote_3mf_stream_analyzer","remote_3mf_xml_iterparse","remote_3mf_transform_aware_bounds","remote_3mf_cad_drawing_v1","remote_3mf_reconstruction_sections_v2","auto_hole_slot_detection","blind_cavity_detection_v1","planar_face_cluster_locator_v1","cavity_bottom_face_match_v1","residual_wall_normal_distance_v1","paired_plane_thickness_v1","bounded_per_part_feature_scan_v1","auto_fillet_chamfer_candidates","auto_section_view_plan","multipart_dimension_semantics","supplementary_stl_step_analyzer","remote_source_url_analyzer_v1","counterpart_alignment_v1","counterpart_reference_mesh_evidence_v1","counterpart_exact_surface_distance_v1","generic_memory_budget_v1","streaming_3mf_glb_export","source_3mf_glb_preview_v1","world_space_feature_center_v1","auto_text_boldening","typography_layout_bounds","script_aware_glyph_spacing","glyph_clearance_gate","text_readability_gate","bambu_04_text_profile","text_slicer_no_merge_gate","separate_structural_text_min_feature","arachne_text_project_settings","bambu_cli_real_slice","gcode_3mf_toolpath_gate","print_ready_plate_3mf","plate_part_coverage_gate","universal_cad_recipe_v2","cad_evidence_parametric_binding_v1","blind_cavity_recipe_cut_v1","planar_design_fidelity_artifact_gate_v1","universal_design_fidelity_artifact_gate_v1","section_loft_reconstruction_v1","section_loft_open_cavity_v2","multipart_relation_rebuild_v1","per_part_reconstruction_evidence_v1","planar_multiloop_extrusion_v1","planar_mesh_projection_fallback_v1","bambu_assembly_metadata_evidence_v1","assembly_pose_solver_v1","assembly_pose_solver_v3","mechanism_pose_brep_probe_v1","mechanism_motion_solver_v1","mechanism_motion_solver_v2","mechanism_motion_solver_v3","hinge_sweep_collision_gate_v1","terminal_stop_refinement_v1","latch_relative_pivot_engagement_v1","motion_bbox_prefilter_v1","motion_memory_checkpoint_v1","motion_exact_separation_prefilter_v1","motion_fail_closed_collision_v1","motion_early_direction_exit_v1","motion_isolated_subprocess_v1","motion_timeout_guard_v1","async_motion_jobs_v1","separate_part_mate_resolver_v1","planar_ring_opening_match_v1","faceted_mesh_brep_v1","complex_topology_mesh_fallback_v1","sealed_internal_cavity_mesh_fallback_v1","multipart_dimension_semantics_v2","source_intended_contact_qa_v1","same_root_assembly_guard_v1","axisymmetric_revolve_reconstruction_v1","bounded_inprocess_universal_jobs_v1","planar_prismatic_reconstruction_v1","commercial_visual_release_gate_v1","fail_closed_family_router_v1","svg_profile_extrusion_v1","formal_geometry_only_render_v1","text_08mm_baseline_v1","generic_blender_profile_executor_v1","generic_blender_to_cad_brep_v1","design_model_provider_router_v1","modal_triposg_provider_v1",],"profiles":["bambu_a1_mini_04"],"universal_executor_probe":{"cavity_loft_policy":UNIVERSAL_CAVITY_LOFT_POLICY,"loft_argcount":_u_loft_from_loops.__code__.co_argcount}})
+        if path=="/health":return self.send_json(200,{"ok":True,"service":"makersence-cad-worker","version":"2.64.2-multi-instance-arrangement","engine":"cadquery+blender+svgpathtools+shapely+pillow","blender":{"available":pathlib.Path(BLENDER_BIN).exists(),"binary":BLENDER_BIN},"bambu_slicer":{"available":bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),"engine":"Bambu Studio","version":BAMBU_VERSION},"design_model_provider":design_model_provider_status(),"capabilities":["compact_step_brep","bambu_native_parts","detachable_parts","assembly_render","product_dimensions","open_edges_zero_gate","formal_mesh_render","artifact_reaudit","rectangular_blind_pockets","geometry_intent_gate","orphan_geometry_gate","unintended_through_cut_gate","welded_3mf_meshes","exported_3mf_topology_gate","true_font_outline_text","high_smooth_vector_mesh","multilingual_font_fallback","actual_text_stroke_gate","adaptive_cjk_regular_first","cjk_internal_clearance_gate","cjk_counter_preservation_gate","text_mesh_topology_candidate_gate","remote_3mf_stream_analyzer","remote_3mf_xml_iterparse","remote_3mf_transform_aware_bounds","remote_3mf_cad_drawing_v1","remote_3mf_reconstruction_sections_v2","auto_hole_slot_detection","blind_cavity_detection_v1","planar_face_cluster_locator_v1","cavity_bottom_face_match_v1","residual_wall_normal_distance_v1","paired_plane_thickness_v1","bounded_per_part_feature_scan_v1","auto_fillet_chamfer_candidates","auto_section_view_plan","multipart_dimension_semantics","supplementary_stl_step_analyzer","remote_source_url_analyzer_v1","counterpart_alignment_v1","counterpart_reference_mesh_evidence_v1","counterpart_multi_instance_arrangement_v1","counterpart_exact_surface_distance_v1","generic_memory_budget_v1","streaming_3mf_glb_export","source_3mf_glb_preview_v1","world_space_feature_center_v1","auto_text_boldening","typography_layout_bounds","script_aware_glyph_spacing","glyph_clearance_gate","text_readability_gate","bambu_04_text_profile","text_slicer_no_merge_gate","separate_structural_text_min_feature","arachne_text_project_settings","bambu_cli_real_slice","gcode_3mf_toolpath_gate","print_ready_plate_3mf","plate_part_coverage_gate","universal_cad_recipe_v2","cad_evidence_parametric_binding_v1","blind_cavity_recipe_cut_v1","planar_design_fidelity_artifact_gate_v1","universal_design_fidelity_artifact_gate_v1","section_loft_reconstruction_v1","section_loft_open_cavity_v2","multipart_relation_rebuild_v1","per_part_reconstruction_evidence_v1","planar_multiloop_extrusion_v1","planar_mesh_projection_fallback_v1","bambu_assembly_metadata_evidence_v1","assembly_pose_solver_v1","assembly_pose_solver_v3","mechanism_pose_brep_probe_v1","mechanism_motion_solver_v1","mechanism_motion_solver_v2","mechanism_motion_solver_v3","hinge_sweep_collision_gate_v1","terminal_stop_refinement_v1","latch_relative_pivot_engagement_v1","motion_bbox_prefilter_v1","motion_memory_checkpoint_v1","motion_exact_separation_prefilter_v1","motion_fail_closed_collision_v1","motion_early_direction_exit_v1","motion_isolated_subprocess_v1","motion_timeout_guard_v1","async_motion_jobs_v1","separate_part_mate_resolver_v1","planar_ring_opening_match_v1","faceted_mesh_brep_v1","complex_topology_mesh_fallback_v1","sealed_internal_cavity_mesh_fallback_v1","multipart_dimension_semantics_v2","source_intended_contact_qa_v1","same_root_assembly_guard_v1","axisymmetric_revolve_reconstruction_v1","bounded_inprocess_universal_jobs_v1","planar_prismatic_reconstruction_v1","commercial_visual_release_gate_v1","fail_closed_family_router_v1","svg_profile_extrusion_v1","formal_geometry_only_render_v1","text_08mm_baseline_v1","generic_blender_profile_executor_v1","generic_blender_to_cad_brep_v1","design_model_provider_router_v1","modal_triposg_provider_v1",],"profiles":["bambu_a1_mini_04"],"universal_executor_probe":{"cavity_loft_policy":UNIVERSAL_CAVITY_LOFT_POLICY,"loft_argcount":_u_loft_from_loops.__code__.co_argcount}})
         if path=="/v1/selftest/face-evidence":
             if not self.authorized():return
             return self.send_json(200,_dw_face_evidence_selftest())
