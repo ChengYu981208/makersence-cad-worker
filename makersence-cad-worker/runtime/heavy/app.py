@@ -4320,7 +4320,7 @@ def align_counterpart_urls(source_url,counterpart_url,relation="support"):
     exact_rows.sort(key=lambda x:x[0],reverse=True)
     best=exact_rows[0] if exact_rows else (refined[0] if refined else coarse[0])
     distinct=[]
-    for row in exact_rows[:60] if exact_rows else refined[:250]:
+    for row in (exact_rows[:60] if exact_rows else refined[:250]):
         if not distinct:distinct.append(row);continue
         if all(math.dist(row[2],q[2])>5.0 or row[1]!=q[1] for q in distinct):
             distinct.append(row)
