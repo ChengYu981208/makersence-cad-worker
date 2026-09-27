@@ -25,6 +25,7 @@ ROOT.mkdir(parents=True,exist_ok=True)
 JOBS={}
 SLICE_JOBS={}
 MOTION_JOBS={}
+ALIGNMENT_JOBS={}
 BAMBU_BIN=os.environ.get("BAMBU_BIN","")
 BAMBU_VERSION=os.environ.get("BAMBU_VERSION","2.8.2.61")
 BAMBU_HOME=pathlib.Path("/tmp/bambu-home")
@@ -3505,6 +3506,54 @@ def _submit_motion_job(req):
     t=threading.Thread(target=_motion_job_runner,args=(jid,req),daemon=True,name="makersence-motion-"+jid[-8:]);t.start()
     return {"job_id":jid,"status":"queued","execution_mode":"isolated_subprocess"}
 
+def _counterpart_alignment_job_runner(jid,req):
+    folder=ROOT/jid;folder.mkdir(parents=True,exist_ok=True)
+    request_path=folder/"alignment_request.json";result_path=folder/"alignment_result.json";log_path=folder/"alignment_child.log"
+    started=time.time()
+    with HEAVY_JOB_SEMAPHORE:
+        try:
+            request_path.write_text(json.dumps(req,ensure_ascii=False),encoding="utf-8")
+            ALIGNMENT_JOBS[jid].update({"status":"processing","stage":"isolated_starting","execution_mode":"isolated_subprocess","started_at":started,"updated_at":time.time()})
+            with log_path.open("wb") as log:
+                proc=subprocess.Popen([sys.executable,str(pathlib.Path(__file__).resolve()),"--counterpart-alignment-child",jid,str(folder)],stdout=log,stderr=subprocess.STDOUT,env=os.environ.copy())
+                ALIGNMENT_JOBS[jid].update({"stage":"isolated_running","child_pid":int(proc.pid),"updated_at":time.time()})
+                timeout=max(60,min(600,int(f(req.get("alignment_timeout_seconds"),240))))
+                try:rc=proc.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    proc.kill();proc.wait(timeout=10)
+                    raise TimeoutError("COUNTERPART_ALIGNMENT_CHILD_TIMEOUT:"+str(timeout))
+            if not result_path.exists():
+                raise RuntimeError("COUNTERPART_ALIGNMENT_CHILD_NO_RESULT:exit="+str(rc)+":"+_job_log_tail(log_path,2500))
+            child=json.loads(result_path.read_text(encoding="utf-8"))
+            if not isinstance(child,dict) or child.get("status")!="completed" or not isinstance(child.get("result"),dict):
+                raise RuntimeError("COUNTERPART_ALIGNMENT_CHILD_INVALID_RESULT:"+str(child)[:800])
+            ALIGNMENT_JOBS[jid].update({"status":"completed","stage":"completed","result":child["result"],"error":None,"execution_mode":"isolated_subprocess","child_exit_code":int(rc),"duration_ms":int((time.time()-started)*1000),"completed_at":time.time(),"updated_at":time.time()})
+        except Exception as ex:
+            ALIGNMENT_JOBS[jid].update({"status":"failed","stage":"failed","error":str(ex)[:1200],"execution_mode":"isolated_subprocess","duration_ms":int((time.time()-started)*1000),"child_log_tail":_job_log_tail(log_path,2500),"completed_at":time.time(),"updated_at":time.time()})
+        finally:
+            try:request_path.unlink(missing_ok=True)
+            except Exception:pass
+            gc.collect();_malloc_trim()
+
+def _counterpart_alignment_child_cli(jid,folder):
+    folder=pathlib.Path(folder);request_path=folder/"alignment_request.json";result_path=folder/"alignment_result.json"
+    req=json.loads(request_path.read_text(encoding="utf-8"))
+    result=align_counterpart_urls(req.get("source_url"),req.get("counterpart_url"),req.get("relation") or "support",req.get("expected_instances",1),req.get("counterpart_context"))
+    out={"status":"completed","result":result,"completed_at":time.time()}
+    tmp=result_path.with_suffix(".tmp");tmp.write_text(json.dumps(out,ensure_ascii=False),encoding="utf-8");tmp.replace(result_path)
+    return 0
+
+def _submit_counterpart_alignment_job(req):
+    key=str(req.get("idempotency_key") or "").strip()[:180]
+    if key:
+        for jid,job in list(ALIGNMENT_JOBS.items()):
+            if job.get("idempotency_key")==key and job.get("status") in ("queued","processing","completed"):
+                return {"job_id":jid,"status":job["status"],"execution_mode":job.get("execution_mode") or "isolated_subprocess","reused":True}
+    jid="align-"+str(uuid.uuid4())
+    ALIGNMENT_JOBS[jid]={"status":"queued","stage":"queued","result":None,"error":None,"execution_mode":"isolated_subprocess","idempotency_key":key or None,"created_at":time.time(),"updated_at":time.time()}
+    t=threading.Thread(target=_counterpart_alignment_job_runner,args=(jid,req),daemon=True,name="makersence-align-"+jid[-8:]);t.start()
+    return {"job_id":jid,"status":"queued","execution_mode":"isolated_subprocess","reused":False}
+
 def _dw_drawing(z,part,world=None):
     if not part:return {'version':'cad-drawing-v1','status':'unavailable','reason':'no_part'}
     mesh=_dw_extract_mesh(z,part,world)
@@ -4529,7 +4578,7 @@ def _u_cad_evidence_binding_selftest():
     return {"status":"PASS" if all(checks.values()) else "FAIL","checks":checks,"bindings":binding_rows,"removed_volume_mm3":round(removed,3),"expected_removed_volume_mm3":round(expected,3)}
 
 class Handler(BaseHTTPRequestHandler):
-    server_version="MakerSenceCAD/2.64.2-multi-instance-arrangement"
+    server_version="MakerSenceCAD/2.64.3-async-multi-instance-alignment"
     def log_message(self,fmt,*args):print(fmt%args,flush=True)
     def send_json(self,code,obj):
         data=json.dumps(obj,ensure_ascii=False).encode("utf-8")
@@ -4545,7 +4594,7 @@ class Handler(BaseHTTPRequestHandler):
         return True
     def do_GET(self):
         path=urlparse(self.path).path
-        if path=="/health":return self.send_json(200,{"ok":True,"service":"makersence-cad-worker","version":"2.64.2-multi-instance-arrangement","engine":"cadquery+blender+svgpathtools+shapely+pillow","blender":{"available":pathlib.Path(BLENDER_BIN).exists(),"binary":BLENDER_BIN},"bambu_slicer":{"available":bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),"engine":"Bambu Studio","version":BAMBU_VERSION},"design_model_provider":design_model_provider_status(),"capabilities":["compact_step_brep","bambu_native_parts","detachable_parts","assembly_render","product_dimensions","open_edges_zero_gate","formal_mesh_render","artifact_reaudit","rectangular_blind_pockets","geometry_intent_gate","orphan_geometry_gate","unintended_through_cut_gate","welded_3mf_meshes","exported_3mf_topology_gate","true_font_outline_text","high_smooth_vector_mesh","multilingual_font_fallback","actual_text_stroke_gate","adaptive_cjk_regular_first","cjk_internal_clearance_gate","cjk_counter_preservation_gate","text_mesh_topology_candidate_gate","remote_3mf_stream_analyzer","remote_3mf_xml_iterparse","remote_3mf_transform_aware_bounds","remote_3mf_cad_drawing_v1","remote_3mf_reconstruction_sections_v2","auto_hole_slot_detection","blind_cavity_detection_v1","planar_face_cluster_locator_v1","cavity_bottom_face_match_v1","residual_wall_normal_distance_v1","paired_plane_thickness_v1","bounded_per_part_feature_scan_v1","auto_fillet_chamfer_candidates","auto_section_view_plan","multipart_dimension_semantics","supplementary_stl_step_analyzer","remote_source_url_analyzer_v1","counterpart_alignment_v1","counterpart_reference_mesh_evidence_v1","counterpart_multi_instance_arrangement_v1","counterpart_exact_surface_distance_v1","generic_memory_budget_v1","streaming_3mf_glb_export","source_3mf_glb_preview_v1","world_space_feature_center_v1","auto_text_boldening","typography_layout_bounds","script_aware_glyph_spacing","glyph_clearance_gate","text_readability_gate","bambu_04_text_profile","text_slicer_no_merge_gate","separate_structural_text_min_feature","arachne_text_project_settings","bambu_cli_real_slice","gcode_3mf_toolpath_gate","print_ready_plate_3mf","plate_part_coverage_gate","universal_cad_recipe_v2","cad_evidence_parametric_binding_v1","blind_cavity_recipe_cut_v1","planar_design_fidelity_artifact_gate_v1","universal_design_fidelity_artifact_gate_v1","section_loft_reconstruction_v1","section_loft_open_cavity_v2","multipart_relation_rebuild_v1","per_part_reconstruction_evidence_v1","planar_multiloop_extrusion_v1","planar_mesh_projection_fallback_v1","bambu_assembly_metadata_evidence_v1","assembly_pose_solver_v1","assembly_pose_solver_v3","mechanism_pose_brep_probe_v1","mechanism_motion_solver_v1","mechanism_motion_solver_v2","mechanism_motion_solver_v3","hinge_sweep_collision_gate_v1","terminal_stop_refinement_v1","latch_relative_pivot_engagement_v1","motion_bbox_prefilter_v1","motion_memory_checkpoint_v1","motion_exact_separation_prefilter_v1","motion_fail_closed_collision_v1","motion_early_direction_exit_v1","motion_isolated_subprocess_v1","motion_timeout_guard_v1","async_motion_jobs_v1","separate_part_mate_resolver_v1","planar_ring_opening_match_v1","faceted_mesh_brep_v1","complex_topology_mesh_fallback_v1","sealed_internal_cavity_mesh_fallback_v1","multipart_dimension_semantics_v2","source_intended_contact_qa_v1","same_root_assembly_guard_v1","axisymmetric_revolve_reconstruction_v1","bounded_inprocess_universal_jobs_v1","planar_prismatic_reconstruction_v1","commercial_visual_release_gate_v1","fail_closed_family_router_v1","svg_profile_extrusion_v1","formal_geometry_only_render_v1","text_08mm_baseline_v1","generic_blender_profile_executor_v1","generic_blender_to_cad_brep_v1","design_model_provider_router_v1","modal_triposg_provider_v1",],"profiles":["bambu_a1_mini_04"],"universal_executor_probe":{"cavity_loft_policy":UNIVERSAL_CAVITY_LOFT_POLICY,"loft_argcount":_u_loft_from_loops.__code__.co_argcount}})
+        if path=="/health":return self.send_json(200,{"ok":True,"service":"makersence-cad-worker","version":"2.64.3-async-multi-instance-alignment","engine":"cadquery+blender+svgpathtools+shapely+pillow","blender":{"available":pathlib.Path(BLENDER_BIN).exists(),"binary":BLENDER_BIN},"bambu_slicer":{"available":bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),"engine":"Bambu Studio","version":BAMBU_VERSION},"design_model_provider":design_model_provider_status(),"capabilities":["compact_step_brep","bambu_native_parts","detachable_parts","assembly_render","product_dimensions","open_edges_zero_gate","formal_mesh_render","artifact_reaudit","rectangular_blind_pockets","geometry_intent_gate","orphan_geometry_gate","unintended_through_cut_gate","welded_3mf_meshes","exported_3mf_topology_gate","true_font_outline_text","high_smooth_vector_mesh","multilingual_font_fallback","actual_text_stroke_gate","adaptive_cjk_regular_first","cjk_internal_clearance_gate","cjk_counter_preservation_gate","text_mesh_topology_candidate_gate","remote_3mf_stream_analyzer","remote_3mf_xml_iterparse","remote_3mf_transform_aware_bounds","remote_3mf_cad_drawing_v1","remote_3mf_reconstruction_sections_v2","auto_hole_slot_detection","blind_cavity_detection_v1","planar_face_cluster_locator_v1","cavity_bottom_face_match_v1","residual_wall_normal_distance_v1","paired_plane_thickness_v1","bounded_per_part_feature_scan_v1","auto_fillet_chamfer_candidates","auto_section_view_plan","multipart_dimension_semantics","supplementary_stl_step_analyzer","remote_source_url_analyzer_v1","counterpart_alignment_v1","counterpart_reference_mesh_evidence_v1","counterpart_multi_instance_arrangement_v1","counterpart_alignment_async_jobs_v1","counterpart_exact_surface_distance_v1","generic_memory_budget_v1","streaming_3mf_glb_export","source_3mf_glb_preview_v1","world_space_feature_center_v1","auto_text_boldening","typography_layout_bounds","script_aware_glyph_spacing","glyph_clearance_gate","text_readability_gate","bambu_04_text_profile","text_slicer_no_merge_gate","separate_structural_text_min_feature","arachne_text_project_settings","bambu_cli_real_slice","gcode_3mf_toolpath_gate","print_ready_plate_3mf","plate_part_coverage_gate","universal_cad_recipe_v2","cad_evidence_parametric_binding_v1","blind_cavity_recipe_cut_v1","planar_design_fidelity_artifact_gate_v1","universal_design_fidelity_artifact_gate_v1","section_loft_reconstruction_v1","section_loft_open_cavity_v2","multipart_relation_rebuild_v1","per_part_reconstruction_evidence_v1","planar_multiloop_extrusion_v1","planar_mesh_projection_fallback_v1","bambu_assembly_metadata_evidence_v1","assembly_pose_solver_v1","assembly_pose_solver_v3","mechanism_pose_brep_probe_v1","mechanism_motion_solver_v1","mechanism_motion_solver_v2","mechanism_motion_solver_v3","hinge_sweep_collision_gate_v1","terminal_stop_refinement_v1","latch_relative_pivot_engagement_v1","motion_bbox_prefilter_v1","motion_memory_checkpoint_v1","motion_exact_separation_prefilter_v1","motion_fail_closed_collision_v1","motion_early_direction_exit_v1","motion_isolated_subprocess_v1","motion_timeout_guard_v1","async_motion_jobs_v1","separate_part_mate_resolver_v1","planar_ring_opening_match_v1","faceted_mesh_brep_v1","complex_topology_mesh_fallback_v1","sealed_internal_cavity_mesh_fallback_v1","multipart_dimension_semantics_v2","source_intended_contact_qa_v1","same_root_assembly_guard_v1","axisymmetric_revolve_reconstruction_v1","bounded_inprocess_universal_jobs_v1","planar_prismatic_reconstruction_v1","commercial_visual_release_gate_v1","fail_closed_family_router_v1","svg_profile_extrusion_v1","formal_geometry_only_render_v1","text_08mm_baseline_v1","generic_blender_profile_executor_v1","generic_blender_to_cad_brep_v1","design_model_provider_router_v1","modal_triposg_provider_v1",],"profiles":["bambu_a1_mini_04"],"universal_executor_probe":{"cavity_loft_policy":UNIVERSAL_CAVITY_LOFT_POLICY,"loft_argcount":_u_loft_from_loops.__code__.co_argcount}})
         if path=="/v1/selftest/face-evidence":
             if not self.authorized():return
             return self.send_json(200,_dw_face_evidence_selftest())
@@ -4556,7 +4605,11 @@ class Handler(BaseHTTPRequestHandler):
             if not self.authorized():return
             jid=path.split("/")[-1];j=JOBS.get(jid)
             return self.send_json(200,{"job_id":jid,**j}) if j else self.send_json(404,{"error":"job not found"})
-        if path.startswith("/v1/motion-jobs/"):
+        if path.startswith("/v1/counterpart-alignment-jobs/"):
+            if not self.authorized():return
+            jid=path.split("/")[-1];j=ALIGNMENT_JOBS.get(jid)
+            return self.send_json(200,{"job_id":jid,**j}) if j else self.send_json(404,{"error":"counterpart alignment job not found"})
+        if path.startswith("/v1/motion-jobs/")
             if not self.authorized():return
             jid=path.split("/")[-1];j=MOTION_JOBS.get(jid)
             return self.send_json(200,{"job_id":jid,**j}) if j else self.send_json(404,{"error":"motion job not found"})
@@ -4605,6 +4658,14 @@ class Handler(BaseHTTPRequestHandler):
                 req=json.loads(self.rfile.read(n).decode("utf-8"))
                 out=analyze_remote_source_url(req.get("url"),req.get("format") or "",req.get("filename") or "counterpart-source")
                 return self.send_json(200,out)
+            if path=="/v1/submit-counterpart-alignment":
+                if n<=0 or n>300_000:return self.send_json(400,{"error":"invalid counterpart alignment request"})
+                req=json.loads(self.rfile.read(n).decode("utf-8"))
+                if not isinstance(req.get("source_url"),str) or not req["source_url"].startswith("https://"):return self.send_json(400,{"error":"source_url must be https"})
+                if not isinstance(req.get("counterpart_url"),str) or not req["counterpart_url"].startswith("https://"):return self.send_json(400,{"error":"counterpart_url must be https"})
+                expected=req.get("expected_instances",1)
+                if not isinstance(expected,int) or expected<1 or expected>12:return self.send_json(400,{"error":"expected_instances must be an integer from 1 to 12"})
+                return self.send_json(202,_submit_counterpart_alignment_job(req))
             if path=="/v1/align-counterpart":
                 if n<=0 or n>300_000:return self.send_json(400,{"error":"invalid counterpart alignment request"})
                 req=json.loads(self.rfile.read(n).decode("utf-8"))
@@ -4729,6 +4790,8 @@ def _startup_hybrid_smoke():
 if __name__=="__main__":
     if len(sys.argv)>=4 and sys.argv[1]=="--generate-child":
         raise SystemExit(_generate_child_cli(sys.argv[2],sys.argv[3]))
+    if len(sys.argv)>=4 and sys.argv[1]=="--counterpart-alignment-child":
+        raise SystemExit(_counterpart_alignment_child_cli(sys.argv[2],sys.argv[3]))
     if len(sys.argv)>=4 and sys.argv[1]=="--motion-child":
         raise SystemExit(_motion_child_cli(sys.argv[2],sys.argv[3]))
     print("MakerSence CAD Worker 2.61.0-design-model-router starting on",PORT,"Bambu Studio",BAMBU_VERSION,"available",bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),flush=True)
