@@ -87,7 +87,7 @@ class ProductGeometryContractTests(unittest.TestCase):
 
     def test_nonprotected_hybrid_contract_does_not_force_protected_route(self):
         self.assertFalse(is_interface_preserving_scope({"design_scope_contract": {"protect_mating_interface": False}}))
-        self.assertEqual(protected_rebuild_blockers({}), ["CAD_CONTRACT_OBJECT_REQUIRED"])
+        self.assertEqual(protected_rebuild_blockers({}), ["PRODUCT_GEOMETRY_CONTRACT_MISSING"])
 
 
 if __name__ == "__main__":
