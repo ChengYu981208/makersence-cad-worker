@@ -260,50 +260,5 @@ class ProductGeometryContractTests(unittest.TestCase):
         self.assertEqual(two["matched_instances"], 1)
         self.assertFalse(two["instance_solution_complete"])
 
-    def test_counterpart_alignment_transfers_closed_geometry_and_blocks_unmatched_instances(self):
-        import base64
-        import importlib.util
-        import json
-        import types
-        import zlib
-
-        heavy_dir = Path(__file__).resolve().parents[1] / "runtime" / "heavy"
-        if str(heavy_dir) not in sys.path:
-            sys.path.insert(0, str(heavy_dir))
-        if "svgpathtools" not in sys.modules:
-            svg_stub = types.ModuleType("svgpathtools")
-            svg_stub.parse_path = lambda _path: None
-            sys.modules["svgpathtools"] = svg_stub
-        spec = importlib.util.spec_from_file_location("makersence_heavy_mesh_evidence_test", heavy_dir / "app.py")
-        runtime = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(runtime)
-
-        tetra = {
-            "vertices": [[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]],
-            "triangles": [[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]],
-        }
-        evidence = runtime._ca_counterpart_mesh_evidence(tetra)
-        self.assertEqual(evidence["status"], "ready")
-        self.assertEqual(evidence["open_edges"], 0)
-        self.assertEqual(evidence["nonmanifold_edges"], 0)
-        payload = json.loads(zlib.decompress(base64.b64decode(evidence["payload"])))
-        self.assertEqual(len(payload["v"]), 4)
-        self.assertEqual(len(payload["t"]), 4)
-
-        open_mesh = {**tetra, "triangles": tetra["triangles"][:-1]}
-        rejected = runtime._ca_counterpart_mesh_evidence(open_mesh)
-        self.assertEqual(rejected["status"], "unavailable")
-        self.assertEqual(rejected["reason"], "counterpart_mesh_not_closed_manifold")
-
-        transform = {"rotation_matrix": [[1,0,0],[0,1,0],[0,0,1]], "translation_mm": [0,0,0]}
-        one = runtime._ca_instance_alignment_evidence(1, "HIGH", transform)
-        two = runtime._ca_instance_alignment_evidence(2, "HIGH", transform)
-        self.assertEqual(one["status"], "ALIGNED")
-        self.assertTrue(one["instance_solution_complete"])
-        self.assertEqual(two["status"], "REVIEW_REQUIRED")
-        self.assertEqual(two["expected_instances"], 2)
-        self.assertEqual(two["matched_instances"], 1)
-        self.assertFalse(two["instance_solution_complete"])
-
 if __name__ == "__main__":
     unittest.main()
