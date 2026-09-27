@@ -4319,7 +4319,7 @@ def _ca_counterpart_mesh_evidence(mesh):
     return {"status":"ready","strategy":"FACETED_MESH_BREP","encoding":"zlib_base64_json_v1","payload":packed,
             "vertex_count":len(vertices),"triangle_count":len(triangles),"open_edges":0,"nonmanifold_edges":0,
             "absolute_volume_mm3":round(signed_volume,6),"bounds_mm":_ca_bbox(vertices),
-            "coordinate_rounding_bound_mm":0.0001,"source":"MEASURED_TRANSFORMED_3MF_MESH"}
+            "coordinate_rounding_bound_mm":0.0001,"coordinate_frame":"COUNTERPART_3MF_OBJECT_FRAME","source":"MEASURED_3MF_OBJECT_MESH"}
 
 def _ca_orientation_affinity(src_dims,cb):
     d=cb["dimensions"];errs=sorted(abs(math.log(max(.05,d[i])/max(.05,src_dims[i]))) for i in range(3))
