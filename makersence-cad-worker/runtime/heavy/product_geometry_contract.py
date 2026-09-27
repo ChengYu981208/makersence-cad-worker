@@ -79,6 +79,57 @@ def _valid_transform(value: Any) -> bool:
     return determinant > 1e-8
 
 
+def _same_transform(a: Any, b: Any, tolerance: float = 1e-3) -> bool:
+    if not _valid_transform(a) or not _valid_transform(b):
+        return False
+    left = a + [[0.0, 0.0, 0.0, 1.0]] if len(a) == 3 else a
+    right = b + [[0.0, 0.0, 0.0, 1.0]] if len(b) == 3 else b
+    return all(abs(float(left[r][c]) - float(right[r][c])) <= tolerance
+               for r in range(4) for c in range(4))
+
+
+def _valid_instance_interface_selection(value: Any, index: int) -> bool:
+    row = _dict(value)
+    axis = str(row.get("axis") or "").upper()
+    plane = _number(row.get("plane_mm"))
+    raw_plane = _number(row.get("raw_source_plane_mm"))
+    band = _number(row.get("band_mm"))
+    span = _number(row.get("span_mm"))
+    return (
+        row.get("instance_index") == index
+        and axis in {"X", "Y", "Z"}
+        and str(row.get("confidence") or "").upper() == "HIGH"
+        and row.get("coordinate_frame") == "source_largest_part_min_normalized"
+        and plane is not None and plane >= 0
+        and raw_plane is not None
+        and band is not None and band > 0
+        and span is not None and span > 0
+        and _valid_transform(row.get("transform_4x4"))
+    )
+
+
+def _complete_multi_instance_alignment(alignment: dict, expected: int, matched: int) -> bool:
+    transforms = _list(alignment.get("instance_transforms_4x4"))
+    selections = _list(alignment.get("instance_interface_selections"))
+    arrangement = _dict(alignment.get("instance_arrangement"))
+    gap = _number(arrangement.get("minimum_instance_gap_mm"))
+    if (
+        expected < 2 or matched != expected
+        or alignment.get("instance_solution_complete") is not True
+        or alignment.get("instance_solution_method") != "BOUNDED_NONOVERLAPPING_AABB_ARRANGEMENT_V1"
+        or len(transforms) != expected or len(selections) != expected
+        or not all(_valid_transform(matrix) for matrix in transforms)
+        or not all(_valid_instance_interface_selection(row, index) for index, row in enumerate(selections))
+        or not all(_same_transform(selections[index].get("transform_4x4"), transforms[index]) for index in range(expected))
+        or arrangement.get("candidate_arrangement_search_complete") is not True
+        or arrangement.get("uniqueness_basis") != "SEARCHED_CANDIDATE_POSES_ONLY"
+        or arrangement.get("separation_proof") != "NONOVERLAPPING_AXIS_ALIGNED_BOUNDING_BOXES"
+        or gap is None or gap < 0
+    ):
+        return False
+    return True
+
+
 def interface_preserving_contract_issues(contract: Any) -> list[str]:
     if not isinstance(contract, dict):
         return ["CAD_CONTRACT_OBJECT_REQUIRED"]
@@ -142,9 +193,20 @@ def interface_preserving_contract_issues(contract: Any) -> list[str]:
         if protected_node is None or str(_dict(protected_node).get("mode") or "").upper() != "DEVICE_ENVELOPE":
             issues.append("DEVICE_ENVELOPE_PROTECTED_INTERFACE_LINK_MISSING")
         alignment = _dict(reference.get("alignment"))
-        transform = alignment.get("selected_transform_4x4")
+        expected_raw = _number(alignment.get("expected_instances"))
+        matched_raw = _number(alignment.get("matched_instances"))
+        expected = int(expected_raw) if expected_raw is not None and expected_raw.is_integer() else 0
+        matched = int(matched_raw) if matched_raw is not None and matched_raw.is_integer() else 0
+        if expected == 1:
+            transforms_resolved = matched == 1 and _valid_transform(alignment.get("selected_transform_4x4"))
+        elif expected >= 2:
+            transforms_resolved = _complete_multi_instance_alignment(alignment, expected, matched)
+            if not transforms_resolved:
+                issues.append("DEVICE_ENVELOPE_INSTANCE_ARRANGEMENT_INCOMPLETE")
+        else:
+            transforms_resolved = False
         if (alignment.get("pose_unique") is not True or str(alignment.get("status") or "").upper() != "ALIGNED"
-                or str(alignment.get("confidence") or "").upper() != "HIGH" or not _valid_transform(transform)):
+                or str(alignment.get("confidence") or "").upper() != "HIGH" or not transforms_resolved):
             issues.append("DEVICE_ENVELOPE_ALIGNMENT_UNRESOLVED")
         fit = _dict(reference.get("fit"))
         clearance = _number(fit.get("xy_clearance_mm"))
