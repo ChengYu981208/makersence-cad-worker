@@ -230,6 +230,7 @@ class ProductGeometryContractTests(unittest.TestCase):
         }
         evidence = runtime._ca_counterpart_mesh_evidence(tetra)
         self.assertEqual(evidence["status"], "ready")
+        self.assertEqual(evidence["coordinate_frame"], "COUNTERPART_3MF_OBJECT_FRAME")
         self.assertEqual(evidence["open_edges"], 0)
         self.assertEqual(evidence["nonmanifold_edges"], 0)
         payload = json.loads(zlib.decompress(base64.b64decode(evidence["payload"])))
