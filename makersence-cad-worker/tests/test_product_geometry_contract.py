@@ -236,10 +236,18 @@ class ProductGeometryContractTests(unittest.TestCase):
         self.assertEqual(len(payload["v"]), 4)
         self.assertEqual(len(payload["t"]), 4)
 
-        open_mesh = {**tetra, "triangles": tetra["triangles"][:-1]}
-        rejected = runtime._ca_counterpart_mesh_evidence(open_mesh)
+        open_cube = {
+            "vertices": [[0,0,0],[1,0,0],[1,1,0],[0,1,0],[0,0,1],[1,0,1],[1,1,1],[0,1,1]],
+            "triangles": [
+                [0,2,1],[0,3,2],[4,5,6],[4,6,7],
+                [0,1,5],[0,5,4],[3,7,6],[3,6,2],
+                [0,4,7],[0,7,3],[1,2,6],[1,6,5],
+            ][:-2],
+        }
+        rejected = runtime._ca_counterpart_mesh_evidence(open_cube)
         self.assertEqual(rejected["status"], "unavailable")
         self.assertEqual(rejected["reason"], "counterpart_mesh_not_closed_manifold")
+        self.assertGreater(rejected["open_edges"], 0)
 
         transform = {"rotation_matrix": [[1,0,0],[0,1,0],[0,0,1]], "translation_mm": [0,0,0]}
         one = runtime._ca_instance_alignment_evidence(1, "HIGH", transform)
