@@ -4273,11 +4273,61 @@ def _ca_pose_score(points,m,t,h,src_bbox,contact_mm=1.8,near_mm=4.0):
     score+=span_good*8.0
     return {"score":round(score,4),"contact_count":c,"sample_count":n,"contact_ratio":round(cr,4),"near_ratio":round(nr,4),"intrusion_ratio":round(ir,4),"contact_bbox_mm":{"min":[round(x,3) for x in (_ca_bbox(contact)["min"] if c else [0,0,0])],"max":[round(x,3) for x in (_ca_bbox(contact)["max"] if c else [0,0,0])],"dimensions":[round(x,3) for x in span]},"pose_bbox_mm":{"min":[round(x,3) for x in b["min"]],"max":[round(x,3) for x in b["max"]],"dimensions":[round(x,3) for x in b["dimensions"]]},"axis_overlap_ratio":[round(x,3) for x in ov]}
 
+def _ca_counterpart_mesh_evidence(mesh):
+    vv=mesh.get("vertices") or []
+    tt=mesh.get("triangles") or []
+    if len(tt)<4 or len(tt)>30000 or len(vv)<4 or len(vv)>18000:
+        return {"status":"unavailable","reason":"counterpart_mesh_budget_exceeded","vertex_count":len(vv),"triangle_count":len(tt)}
+    vertices=[]
+    for p in vv:
+        if not isinstance(p,(list,tuple)) or len(p)!=3:
+            return {"status":"unavailable","reason":"counterpart_mesh_vertex_invalid"}
+        row=[float(x) for x in p]
+        if not all(math.isfinite(x) for x in row):
+            return {"status":"unavailable","reason":"counterpart_mesh_vertex_nonfinite"}
+        vertices.append(row)
+    triangles=[]
+    for tri in tt:
+        if not isinstance(tri,(list,tuple)) or len(tri)!=3:
+            return {"status":"unavailable","reason":"counterpart_mesh_triangle_invalid"}
+        try: row=[int(x) for x in tri]
+        except Exception:return {"status":"unavailable","reason":"counterpart_mesh_triangle_index_invalid"}
+        if len(set(row))!=3 or min(row)<0 or max(row)>=len(vertices):
+            return {"status":"unavailable","reason":"counterpart_mesh_triangle_index_invalid"}
+        a,b,c=[vertices[i] for i in row]
+        ab=[b[i]-a[i] for i in range(3)];ac=[c[i]-a[i] for i in range(3)]
+        cross=[ab[1]*ac[2]-ab[2]*ac[1],ab[2]*ac[0]-ab[0]*ac[2],ab[0]*ac[1]-ab[1]*ac[0]]
+        if sum(x*x for x in cross)<=1e-20:
+            return {"status":"unavailable","reason":"counterpart_mesh_degenerate_triangle"}
+        triangles.append(row)
+    stats=mesh_edge_stats(vertices,triangles)
+    if int(stats.get("open_edges") or 0)!=0 or int(stats.get("nonmanifold_edges") or 0)!=0:
+        return {"status":"unavailable","reason":"counterpart_mesh_not_closed_manifold","open_edges":stats.get("open_edges"),"nonmanifold_edges":stats.get("nonmanifold_edges")}
+    signed_volume=0.0
+    for ia,ib,ic in triangles:
+        a,b,c=vertices[ia],vertices[ib],vertices[ic]
+        signed_volume+=(a[0]*(b[1]*c[2]-b[2]*c[1])+a[1]*(b[2]*c[0]-b[0]*c[2])+a[2]*(b[0]*c[1]-b[1]*c[0]))/6.0
+    if not math.isfinite(signed_volume) or abs(signed_volume)<=1e-8:
+        return {"status":"unavailable","reason":"counterpart_mesh_enclosed_volume_unresolved"}
+    if signed_volume<0:
+        triangles=[[a,c,b] for a,b,c in triangles]
+        signed_volume=-signed_volume
+    payload={"v":[[round(x,4) for x in p] for p in vertices],"t":triangles}
+    packed=base64.b64encode(zlib.compress(json.dumps(payload,separators=(",",":")).encode("utf-8"),6)).decode("ascii")
+    if len(packed)>1500000:
+        return {"status":"unavailable","reason":"counterpart_mesh_payload_budget_exceeded","vertex_count":len(vertices),"triangle_count":len(triangles),"payload_bytes":len(packed)}
+    return {"status":"ready","strategy":"FACETED_MESH_BREP","encoding":"zlib_base64_json_v1","payload":packed,
+            "vertex_count":len(vertices),"triangle_count":len(triangles),"open_edges":0,"nonmanifold_edges":0,
+            "absolute_volume_mm3":round(signed_volume,6),"bounds_mm":_ca_bbox(vertices),
+            "coordinate_rounding_bound_mm":0.0001,"source":"MEASURED_TRANSFORMED_3MF_MESH"}
+
 def _ca_orientation_affinity(src_dims,cb):
     d=cb["dimensions"];errs=sorted(abs(math.log(max(.05,d[i])/max(.05,src_dims[i]))) for i in range(3))
     return errs[0]+errs[1]
 
-def align_counterpart_urls(source_url,counterpart_url,relation="support"):
+def align_counterpart_urls(source_url,counterpart_url,relation="support",expected_instances=1,counterpart_context=None):
+    try:expected_instances=max(1,min(12,int(expected_instances or 1)))
+    except Exception:raise ValueError("counterpart expected_instances must be an integer from 1 to 12")
     sp,sbytes=_ca_download_3mf(source_url,"source");cp,cbytes=_ca_download_3mf(counterpart_url,"counterpart")
     src=_ca_largest_mesh_3mf(sp);ctr=_ca_largest_mesh_3mf(cp)
     src_surface=_ca_surface_samples(src,12000);h=_ca_hash(src_surface,5.0);ctr_pts=_ca_point_samples(ctr,900)
@@ -4348,12 +4398,13 @@ def align_counterpart_urls(source_url,counterpart_url,relation="support"):
         mm=row[3];cb=mm.get("contact_bbox_mm") or {};cc=[((cb.get("min") or [0,0,0])[i]+(cb.get("max") or [0,0,0])[i])/2 for i in range(3)]
         solution_rows.append({"score":round(row[0],3),"rotation_matrix":[[int(v) for v in rr] for rr in row[1]],"translation_mm":[round(x,3) for x in row[2]],"contact_count":mm.get("contact_count"),"intrusion_ratio":mm.get("intrusion_ratio"),"contact_bbox_mm":cb,"contact_center_mm":[round(x,3) for x in cc]})
     return {
-      "status":"ALIGNED" if confidence=="HIGH" else "REVIEW_REQUIRED",
+      "status":"ALIGNED" if confidence=="HIGH" and expected_instances==1 else "REVIEW_REQUIRED",
       "version":"counterpart-alignment-v1",
       "confidence":confidence,
       "relation":str(relation or "support"),
       "source":{"name":src.get("name"),"dimensions_mm":[round(x,3) for x in src["bbox"]["dimensions"]],"triangle_count":len(src["triangles"]),"file_size_bytes":sbytes},
-      "counterpart":{"name":ctr.get("name"),"dimensions_mm":[round(x,3) for x in ctr["bbox"]["dimensions"]],"triangle_count":len(ctr["triangles"]),"file_size_bytes":cbytes},
+      "counterpart":{"name":ctr.get("name"),"dimensions_mm":[round(x,3) for x in ctr["bbox"]["dimensions"]],"triangle_count":len(ctr["triangles"]),"file_size_bytes":cbytes,"identity":{k:str((counterpart_context or {}).get(k) or "")[:160] for k in ("model_id","profile_id","instance_id") if (counterpart_context or {}).get(k)},"geometry_evidence":{"mesh_brep":_ca_counterpart_mesh_evidence(ctr)}},
+      "expected_instances":expected_instances,"matched_instances":1,"instance_transforms":[{"rotation_matrix":[[int(v) for v in rr] for rr in best[1]],"translation_mm":[round(x,3) for x in best[2]]}],
       "transform":{"rotation_matrix":[[int(v) for v in rr] for rr in best[1]],"translation_mm":[round(x,3) for x in best[2]]},
       "metrics":{**met,"score_gap":round(gap,3),"orientation_affinity":best[4],"distinct_solution_count":len(distinct),"checks":{"contact_support":contact_ok,"low_intrusion":intrusion_ok,"contact_span":span_ok,"solution_unique":uniqueness_ok},"solutions":solution_rows},
       "interface_selection":{"axis":"XYZ"[axis_i],"plane_mm":round(plane,3),"raw_source_plane_mm":round(raw_plane,3),"band_mm":round(band,3),"span_mm":round(max(cd),3),"confidence":confidence,"reason":"counterpart_geometry_contact_alignment_v1","coordinate_frame":"source_largest_part_min_normalized"},
@@ -4405,7 +4456,7 @@ def _u_cad_evidence_binding_selftest():
     return {"status":"PASS" if all(checks.values()) else "FAIL","checks":checks,"bindings":binding_rows,"removed_volume_mm3":round(removed,3),"expected_removed_volume_mm3":round(expected,3)}
 
 class Handler(BaseHTTPRequestHandler):
-    server_version="MakerSenceCAD/2.64.0-counterpart-exact-alignment"
+    server_version="MakerSenceCAD/2.64.1-counterpart-reference-mesh"
     def log_message(self,fmt,*args):print(fmt%args,flush=True)
     def send_json(self,code,obj):
         data=json.dumps(obj,ensure_ascii=False).encode("utf-8")
@@ -4421,7 +4472,7 @@ class Handler(BaseHTTPRequestHandler):
         return True
     def do_GET(self):
         path=urlparse(self.path).path
-        if path=="/health":return self.send_json(200,{"ok":True,"service":"makersence-cad-worker","version":"2.64.0-counterpart-exact-alignment","engine":"cadquery+blender+svgpathtools+shapely+pillow","blender":{"available":pathlib.Path(BLENDER_BIN).exists(),"binary":BLENDER_BIN},"bambu_slicer":{"available":bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),"engine":"Bambu Studio","version":BAMBU_VERSION},"design_model_provider":design_model_provider_status(),"capabilities":["compact_step_brep","bambu_native_parts","detachable_parts","assembly_render","product_dimensions","open_edges_zero_gate","formal_mesh_render","artifact_reaudit","rectangular_blind_pockets","geometry_intent_gate","orphan_geometry_gate","unintended_through_cut_gate","welded_3mf_meshes","exported_3mf_topology_gate","true_font_outline_text","high_smooth_vector_mesh","multilingual_font_fallback","actual_text_stroke_gate","adaptive_cjk_regular_first","cjk_internal_clearance_gate","cjk_counter_preservation_gate","text_mesh_topology_candidate_gate","remote_3mf_stream_analyzer","remote_3mf_xml_iterparse","remote_3mf_transform_aware_bounds","remote_3mf_cad_drawing_v1","remote_3mf_reconstruction_sections_v2","auto_hole_slot_detection","blind_cavity_detection_v1","planar_face_cluster_locator_v1","cavity_bottom_face_match_v1","residual_wall_normal_distance_v1","paired_plane_thickness_v1","bounded_per_part_feature_scan_v1","auto_fillet_chamfer_candidates","auto_section_view_plan","multipart_dimension_semantics","supplementary_stl_step_analyzer","remote_source_url_analyzer_v1","counterpart_alignment_v1","counterpart_exact_surface_distance_v1","generic_memory_budget_v1","streaming_3mf_glb_export","source_3mf_glb_preview_v1","world_space_feature_center_v1","auto_text_boldening","typography_layout_bounds","script_aware_glyph_spacing","glyph_clearance_gate","text_readability_gate","bambu_04_text_profile","text_slicer_no_merge_gate","separate_structural_text_min_feature","arachne_text_project_settings","bambu_cli_real_slice","gcode_3mf_toolpath_gate","print_ready_plate_3mf","plate_part_coverage_gate","universal_cad_recipe_v2","cad_evidence_parametric_binding_v1","blind_cavity_recipe_cut_v1","planar_design_fidelity_artifact_gate_v1","universal_design_fidelity_artifact_gate_v1","section_loft_reconstruction_v1","section_loft_open_cavity_v2","multipart_relation_rebuild_v1","per_part_reconstruction_evidence_v1","planar_multiloop_extrusion_v1","planar_mesh_projection_fallback_v1","bambu_assembly_metadata_evidence_v1","assembly_pose_solver_v1","assembly_pose_solver_v3","mechanism_pose_brep_probe_v1","mechanism_motion_solver_v1","mechanism_motion_solver_v2","mechanism_motion_solver_v3","hinge_sweep_collision_gate_v1","terminal_stop_refinement_v1","latch_relative_pivot_engagement_v1","motion_bbox_prefilter_v1","motion_memory_checkpoint_v1","motion_exact_separation_prefilter_v1","motion_fail_closed_collision_v1","motion_early_direction_exit_v1","motion_isolated_subprocess_v1","motion_timeout_guard_v1","async_motion_jobs_v1","separate_part_mate_resolver_v1","planar_ring_opening_match_v1","faceted_mesh_brep_v1","complex_topology_mesh_fallback_v1","sealed_internal_cavity_mesh_fallback_v1","multipart_dimension_semantics_v2","source_intended_contact_qa_v1","same_root_assembly_guard_v1","axisymmetric_revolve_reconstruction_v1","bounded_inprocess_universal_jobs_v1","planar_prismatic_reconstruction_v1","commercial_visual_release_gate_v1","fail_closed_family_router_v1","svg_profile_extrusion_v1","formal_geometry_only_render_v1","text_08mm_baseline_v1","generic_blender_profile_executor_v1","generic_blender_to_cad_brep_v1","design_model_provider_router_v1","modal_triposg_provider_v1",],"profiles":["bambu_a1_mini_04"],"universal_executor_probe":{"cavity_loft_policy":UNIVERSAL_CAVITY_LOFT_POLICY,"loft_argcount":_u_loft_from_loops.__code__.co_argcount}})
+        if path=="/health":return self.send_json(200,{"ok":True,"service":"makersence-cad-worker","version":"2.64.1-counterpart-reference-mesh","engine":"cadquery+blender+svgpathtools+shapely+pillow","blender":{"available":pathlib.Path(BLENDER_BIN).exists(),"binary":BLENDER_BIN},"bambu_slicer":{"available":bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),"engine":"Bambu Studio","version":BAMBU_VERSION},"design_model_provider":design_model_provider_status(),"capabilities":["compact_step_brep","bambu_native_parts","detachable_parts","assembly_render","product_dimensions","open_edges_zero_gate","formal_mesh_render","artifact_reaudit","rectangular_blind_pockets","geometry_intent_gate","orphan_geometry_gate","unintended_through_cut_gate","welded_3mf_meshes","exported_3mf_topology_gate","true_font_outline_text","high_smooth_vector_mesh","multilingual_font_fallback","actual_text_stroke_gate","adaptive_cjk_regular_first","cjk_internal_clearance_gate","cjk_counter_preservation_gate","text_mesh_topology_candidate_gate","remote_3mf_stream_analyzer","remote_3mf_xml_iterparse","remote_3mf_transform_aware_bounds","remote_3mf_cad_drawing_v1","remote_3mf_reconstruction_sections_v2","auto_hole_slot_detection","blind_cavity_detection_v1","planar_face_cluster_locator_v1","cavity_bottom_face_match_v1","residual_wall_normal_distance_v1","paired_plane_thickness_v1","bounded_per_part_feature_scan_v1","auto_fillet_chamfer_candidates","auto_section_view_plan","multipart_dimension_semantics","supplementary_stl_step_analyzer","remote_source_url_analyzer_v1","counterpart_alignment_v1","counterpart_reference_mesh_evidence_v1","counterpart_exact_surface_distance_v1","generic_memory_budget_v1","streaming_3mf_glb_export","source_3mf_glb_preview_v1","world_space_feature_center_v1","auto_text_boldening","typography_layout_bounds","script_aware_glyph_spacing","glyph_clearance_gate","text_readability_gate","bambu_04_text_profile","text_slicer_no_merge_gate","separate_structural_text_min_feature","arachne_text_project_settings","bambu_cli_real_slice","gcode_3mf_toolpath_gate","print_ready_plate_3mf","plate_part_coverage_gate","universal_cad_recipe_v2","cad_evidence_parametric_binding_v1","blind_cavity_recipe_cut_v1","planar_design_fidelity_artifact_gate_v1","universal_design_fidelity_artifact_gate_v1","section_loft_reconstruction_v1","section_loft_open_cavity_v2","multipart_relation_rebuild_v1","per_part_reconstruction_evidence_v1","planar_multiloop_extrusion_v1","planar_mesh_projection_fallback_v1","bambu_assembly_metadata_evidence_v1","assembly_pose_solver_v1","assembly_pose_solver_v3","mechanism_pose_brep_probe_v1","mechanism_motion_solver_v1","mechanism_motion_solver_v2","mechanism_motion_solver_v3","hinge_sweep_collision_gate_v1","terminal_stop_refinement_v1","latch_relative_pivot_engagement_v1","motion_bbox_prefilter_v1","motion_memory_checkpoint_v1","motion_exact_separation_prefilter_v1","motion_fail_closed_collision_v1","motion_early_direction_exit_v1","motion_isolated_subprocess_v1","motion_timeout_guard_v1","async_motion_jobs_v1","separate_part_mate_resolver_v1","planar_ring_opening_match_v1","faceted_mesh_brep_v1","complex_topology_mesh_fallback_v1","sealed_internal_cavity_mesh_fallback_v1","multipart_dimension_semantics_v2","source_intended_contact_qa_v1","same_root_assembly_guard_v1","axisymmetric_revolve_reconstruction_v1","bounded_inprocess_universal_jobs_v1","planar_prismatic_reconstruction_v1","commercial_visual_release_gate_v1","fail_closed_family_router_v1","svg_profile_extrusion_v1","formal_geometry_only_render_v1","text_08mm_baseline_v1","generic_blender_profile_executor_v1","generic_blender_to_cad_brep_v1","design_model_provider_router_v1","modal_triposg_provider_v1",],"profiles":["bambu_a1_mini_04"],"universal_executor_probe":{"cavity_loft_policy":UNIVERSAL_CAVITY_LOFT_POLICY,"loft_argcount":_u_loft_from_loops.__code__.co_argcount}})
         if path=="/v1/selftest/face-evidence":
             if not self.authorized():return
             return self.send_json(200,_dw_face_evidence_selftest())
@@ -4484,7 +4535,7 @@ class Handler(BaseHTTPRequestHandler):
             if path=="/v1/align-counterpart":
                 if n<=0 or n>300_000:return self.send_json(400,{"error":"invalid counterpart alignment request"})
                 req=json.loads(self.rfile.read(n).decode("utf-8"))
-                out=align_counterpart_urls(req.get("source_url"),req.get("counterpart_url"),req.get("relation") or "support")
+                out=align_counterpart_urls(req.get("source_url"),req.get("counterpart_url"),req.get("relation") or "support",req.get("expected_instances",1),req.get("counterpart_context"))
                 return self.send_json(200,out)
             if path=="/v1/resolve-mechanism-pose":
                 if n<=0 or n>2_000_000:return self.send_json(400,{"error":"invalid mechanism pose request"})
