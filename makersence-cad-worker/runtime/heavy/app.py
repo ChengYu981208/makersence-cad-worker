@@ -4325,6 +4325,24 @@ def _ca_orientation_affinity(src_dims,cb):
     d=cb["dimensions"];errs=sorted(abs(math.log(max(.05,d[i])/max(.05,src_dims[i]))) for i in range(3))
     return errs[0]+errs[1]
 
+def _ca_instance_alignment_evidence(expected_instances,confidence,transform):
+    expected=int(expected_instances)
+    rotation=(transform or {}).get("rotation_matrix")
+    translation=(transform or {}).get("translation_mm")
+    valid=(isinstance(rotation,list) and len(rotation)==3 and all(isinstance(r,list) and len(r)==3 for r in rotation)
+           and isinstance(translation,list) and len(translation)==3)
+    if valid:
+        try:
+            rotation=[[float(x) for x in row] for row in rotation]
+            translation=[float(x) for x in translation]
+            valid=all(math.isfinite(x) for row in rotation for x in row) and all(math.isfinite(x) for x in translation)
+        except Exception:valid=False
+    transforms=[{"rotation_matrix":rotation,"translation_mm":translation}] if valid else []
+    matched=len(transforms)
+    return {"status":"ALIGNED" if confidence=="HIGH" and expected==1 and matched==1 else "REVIEW_REQUIRED",
+            "expected_instances":expected,"matched_instances":matched,"instance_transforms":transforms,
+            "instance_solution_method":"SINGLE_INSTANCE_POSE_ONLY","instance_solution_complete":matched==expected}
+
 def align_counterpart_urls(source_url,counterpart_url,relation="support",expected_instances=1,counterpart_context=None):
     try:expected_instances=max(1,min(12,int(expected_instances or 1)))
     except Exception:raise ValueError("counterpart expected_instances must be an integer from 1 to 12")
@@ -4388,6 +4406,7 @@ def align_counterpart_urls(source_url,counterpart_url,relation="support",expecte
     span_ok=span_axes>=2
     uniqueness_ok=second is None or gap>=max(8.0,abs(best[0])*.035)
     confidence="HIGH" if contact_ok and intrusion_ok and span_ok and uniqueness_ok else ("MEDIUM" if contact_ok and intrusion_ok and span_ok else "LOW")
+    instance_alignment=_ca_instance_alignment_evidence(expected_instances,confidence,{"rotation_matrix":[[int(v) for v in rr] for rr in best[1]],"translation_mm":[round(x,3) for x in best[2]]})
     cbox=met.get("contact_bbox_mm") or {};cd=cbox.get("dimensions") or [0,0,0]
     axis_i=min(range(3),key=lambda i:cd[i] if cd[i]>0 else 1e9)
     raw_plane=((cbox.get("min") or [0,0,0])[axis_i]+(cbox.get("max") or [0,0,0])[axis_i])/2
@@ -4398,13 +4417,13 @@ def align_counterpart_urls(source_url,counterpart_url,relation="support",expecte
         mm=row[3];cb=mm.get("contact_bbox_mm") or {};cc=[((cb.get("min") or [0,0,0])[i]+(cb.get("max") or [0,0,0])[i])/2 for i in range(3)]
         solution_rows.append({"score":round(row[0],3),"rotation_matrix":[[int(v) for v in rr] for rr in row[1]],"translation_mm":[round(x,3) for x in row[2]],"contact_count":mm.get("contact_count"),"intrusion_ratio":mm.get("intrusion_ratio"),"contact_bbox_mm":cb,"contact_center_mm":[round(x,3) for x in cc]})
     return {
-      "status":"ALIGNED" if confidence=="HIGH" and expected_instances==1 else "REVIEW_REQUIRED",
+      "status":instance_alignment["status"],
       "version":"counterpart-alignment-v1",
       "confidence":confidence,
       "relation":str(relation or "support"),
       "source":{"name":src.get("name"),"dimensions_mm":[round(x,3) for x in src["bbox"]["dimensions"]],"triangle_count":len(src["triangles"]),"file_size_bytes":sbytes},
       "counterpart":{"name":ctr.get("name"),"dimensions_mm":[round(x,3) for x in ctr["bbox"]["dimensions"]],"triangle_count":len(ctr["triangles"]),"file_size_bytes":cbytes,"identity":{k:str((counterpart_context or {}).get(k) or "")[:160] for k in ("model_id","profile_id","instance_id") if (counterpart_context or {}).get(k)},"geometry_evidence":{"mesh_brep":_ca_counterpart_mesh_evidence(ctr)}},
-      "expected_instances":expected_instances,"matched_instances":1,"instance_transforms":[{"rotation_matrix":[[int(v) for v in rr] for rr in best[1]],"translation_mm":[round(x,3) for x in best[2]]}],
+      "expected_instances":instance_alignment["expected_instances"],"matched_instances":instance_alignment["matched_instances"],"instance_transforms":instance_alignment["instance_transforms"],"instance_solution_method":instance_alignment["instance_solution_method"],"instance_solution_complete":instance_alignment["instance_solution_complete"],
       "transform":{"rotation_matrix":[[int(v) for v in rr] for rr in best[1]],"translation_mm":[round(x,3) for x in best[2]]},
       "metrics":{**met,"score_gap":round(gap,3),"orientation_affinity":best[4],"distinct_solution_count":len(distinct),"checks":{"contact_support":contact_ok,"low_intrusion":intrusion_ok,"contact_span":span_ok,"solution_unique":uniqueness_ok},"solutions":solution_rows},
       "interface_selection":{"axis":"XYZ"[axis_i],"plane_mm":round(plane,3),"raw_source_plane_mm":round(raw_plane,3),"band_mm":round(band,3),"span_mm":round(max(cd),3),"confidence":confidence,"reason":"counterpart_geometry_contact_alignment_v1","coordinate_frame":"source_largest_part_min_normalized"},
