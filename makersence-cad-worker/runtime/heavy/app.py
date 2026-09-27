@@ -4046,6 +4046,221 @@ def analyze_remote_source_url(url,fmt="",filename="counterpart-source"):
     del data;gc.collect()
     return result
 
+
+def _ca_download_3mf(url,label):
+    url=str(url or "").strip()
+    if not url.startswith("https://"):raise ValueError(label+" URL must be https")
+    folder=ROOT/("align-"+str(uuid.uuid4()));folder.mkdir(parents=True,exist_ok=True)
+    p=folder/(label+".3mf");total=0
+    req=Request(url,headers={"User-Agent":"MakerSence/2.63","Accept":"application/octet-stream,*/*"})
+    with urlopen(req,timeout=90) as r,open(p,"wb") as out:
+        declared=int(r.headers.get("Content-Length") or 0)
+        if declared>80_000_000:raise ValueError(label+" 3MF exceeds 80 MB worker limit")
+        while True:
+            chunk=r.read(1024*1024)
+            if not chunk:break
+            total+=len(chunk)
+            if total>80_000_000:raise ValueError(label+" 3MF exceeds 80 MB worker limit")
+            out.write(chunk)
+    if total<128:raise ValueError(label+" 3MF is empty")
+    return p,total
+
+def _ca_bbox(vv):
+    lo=[float("inf")]*3;hi=[float("-inf")]*3
+    for p in vv:
+        for i in range(3):lo[i]=min(lo[i],p[i]);hi[i]=max(hi[i],p[i])
+    return {"min":lo,"max":hi,"dimensions":[hi[i]-lo[i] for i in range(3)],"center":[(lo[i]+hi[i])/2 for i in range(3)]}
+
+def _ca_largest_mesh_3mf(path):
+    scales={"micron":.001,"millimeter":1.0,"centimeter":10.0,"inch":25.4,"meter":1000.0}
+    best=None
+    with zipfile.ZipFile(path,"r") as z:
+        if z.testzip() is not None:raise ValueError("3MF ZIP damaged")
+        models=[n for n in z.namelist() if n.lower().endswith(".model")]
+        for name in models:
+            scale=1.0;cur=None
+            with z.open(name) as fh:
+                for ev,el in ET.iterparse(fh,events=("start","end")):
+                    tag=str(el.tag).rsplit("}",1)[-1]
+                    if ev=="start":
+                        if tag=="model":scale=scales.get(str(el.attrib.get("unit","millimeter")).lower(),1.0)
+                        elif tag=="object":cur={"id":str(el.attrib.get("id") or ""),"name":el.attrib.get("name") or "Object","vertices":[],"triangles":[]}
+                        continue
+                    if cur is not None and tag=="vertex":
+                        cur["vertices"].append([f(el.attrib.get("x"))*scale,f(el.attrib.get("y"))*scale,f(el.attrib.get("z"))*scale])
+                    elif cur is not None and tag=="triangle":
+                        try:cur["triangles"].append([int(el.attrib.get("v1")),int(el.attrib.get("v2")),int(el.attrib.get("v3"))])
+                        except:pass
+                    elif tag=="object" and cur is not None:
+                        if cur["vertices"] and cur["triangles"]:
+                            b=_ca_bbox(cur["vertices"]);d=b["dimensions"];boxv=max(.001,d[0])*max(.001,d[1])*max(.001,d[2])
+                            score=boxv*math.log10(max(10,len(cur["triangles"])))
+                            if best is None or score>best["score"]:
+                                best={**cur,"bbox":b,"score":score,"source_model_path":name}
+                        cur=None
+                    el.clear()
+    if best is None:raise ValueError("3MF has no mesh object")
+    return best
+
+def _ca_rotations():
+    import itertools
+    def parity(p):
+        inv=sum(1 for i in range(3) for j in range(i+1,3) if p[i]>p[j])
+        return -1 if inv%2 else 1
+    out=[]
+    for p in itertools.permutations((0,1,2)):
+        pp=parity(p)
+        for signs in itertools.product((-1,1),repeat=3):
+            if pp*signs[0]*signs[1]*signs[2]!=1:continue
+            m=[[0.0]*3 for _ in range(3)]
+            for row in range(3):m[row][p[row]]=float(signs[row])
+            out.append(m)
+    return out
+
+def _ca_apply_rot(p,m):
+    return [sum(m[i][j]*p[j] for j in range(3)) for i in range(3)]
+
+def _ca_rot_bbox(b,m):
+    pts=[_ca_apply_rot([x,y,z],m) for x in (b["min"][0],b["max"][0]) for y in (b["min"][1],b["max"][1]) for z in (b["min"][2],b["max"][2])]
+    return _ca_bbox(pts)
+
+def _ca_surface_samples(mesh,max_tri=12000):
+    vv=mesh["vertices"];tt=mesh["triangles"];step=max(1,len(tt)//max_tri);out=[]
+    for k in range(0,len(tt),step):
+        t=tt[k]
+        try:a,b,c=vv[t[0]],vv[t[1]],vv[t[2]]
+        except:continue
+        ux=b[0]-a[0];uy=b[1]-a[1];uz=b[2]-a[2];vx=c[0]-a[0];vy=c[1]-a[1];vz=c[2]-a[2]
+        nx=uy*vz-uz*vy;ny=uz*vx-ux*vz;nz=ux*vy-uy*vx;ln=math.sqrt(nx*nx+ny*ny+nz*nz)
+        if ln<=1e-8:continue
+        out.append(((a[0]+b[0]+c[0])/3,(a[1]+b[1]+c[1])/3,(a[2]+b[2]+c[2])/3,nx/ln,ny/ln,nz/ln))
+        if len(out)>=max_tri:break
+    return out
+
+def _ca_point_samples(mesh,max_pts=900):
+    vv=mesh["vertices"];step=max(1,len(vv)//max_pts)
+    return [vv[i] for i in range(0,len(vv),step)][:max_pts]
+
+def _ca_hash(samples,cell=5.0):
+    h={}
+    for q in samples:
+        key=(math.floor(q[0]/cell),math.floor(q[1]/cell),math.floor(q[2]/cell))
+        h.setdefault(key,[]).append(q)
+    return h
+
+def _ca_nearest(p,h,cell=5.0):
+    k=(math.floor(p[0]/cell),math.floor(p[1]/cell),math.floor(p[2]/cell));best=None;bd=1e30
+    for dx in (-1,0,1):
+      for dy in (-1,0,1):
+       for dz in (-1,0,1):
+        for q in h.get((k[0]+dx,k[1]+dy,k[2]+dz),()):
+            dd=(p[0]-q[0])**2+(p[1]-q[1])**2+(p[2]-q[2])**2
+            if dd<bd:bd=dd;best=q
+    return best,math.sqrt(bd) if best is not None else 99.0
+
+def _ca_pose_score(points,m,t,h,src_bbox,contact_mm=1.8,near_mm=4.0):
+    contact=[];near=0;intrude=0;dist_sum=0.0
+    transformed=[]
+    for p0 in points:
+        r=_ca_apply_rot(p0,m);p=[r[i]+t[i] for i in range(3)];transformed.append(p)
+        q,d=_ca_nearest(p,h)
+        if q is None:continue
+        if d<=near_mm:
+            near+=1;dist_sum+=d
+            sd=(p[0]-q[0])*q[3]+(p[1]-q[1])*q[4]+(p[2]-q[2])*q[5]
+            if d<=contact_mm:contact.append(p)
+            if d<=3.0 and sd<-.85:intrude+=1
+    if not transformed:return {"score":-1e9}
+    b=_ca_bbox(transformed);ov=[]
+    for i in range(3):
+        inter=max(0.0,min(b["max"][i],src_bbox["max"][i])-max(b["min"][i],src_bbox["min"][i]))
+        ov.append(inter/max(.001,min(b["dimensions"][i],src_bbox["dimensions"][i])))
+    overlap_bonus=sum(sorted(ov,reverse=True)[:2])*8.0
+    c=len(contact);n=len(points);nr=near/max(1,n);cr=c/max(1,n);ir=intrude/max(1,near)
+    score=c*4.0+near*.65-overlap_bonus*.0+overlap_bonus-intrude*5.5-(dist_sum/max(1,near))*1.2
+    if c:
+        cb=_ca_bbox(contact);span=cb["dimensions"]
+    else:span=[0,0,0]
+    span_good=sum(1 for i,x in enumerate(span) if x>=max(4.0,src_bbox["dimensions"][i]*.06))
+    score+=span_good*8.0
+    return {"score":round(score,4),"contact_count":c,"sample_count":n,"contact_ratio":round(cr,4),"near_ratio":round(nr,4),"intrusion_ratio":round(ir,4),"contact_bbox_mm":{"min":[round(x,3) for x in (_ca_bbox(contact)["min"] if c else [0,0,0])],"max":[round(x,3) for x in (_ca_bbox(contact)["max"] if c else [0,0,0])],"dimensions":[round(x,3) for x in span]},"pose_bbox_mm":{"min":[round(x,3) for x in b["min"]],"max":[round(x,3) for x in b["max"]],"dimensions":[round(x,3) for x in b["dimensions"]]},"axis_overlap_ratio":[round(x,3) for x in ov]}
+
+def _ca_orientation_affinity(src_dims,cb):
+    d=cb["dimensions"];errs=sorted(abs(math.log(max(.05,d[i])/max(.05,src_dims[i]))) for i in range(3))
+    return errs[0]+errs[1]
+
+def align_counterpart_urls(source_url,counterpart_url,relation="support"):
+    sp,sbytes=_ca_download_3mf(source_url,"source");cp,cbytes=_ca_download_3mf(counterpart_url,"counterpart")
+    src=_ca_largest_mesh_3mf(sp);ctr=_ca_largest_mesh_3mf(cp)
+    src_surface=_ca_surface_samples(src,12000);h=_ca_hash(src_surface,5.0);ctr_pts=_ca_point_samples(ctr,900)
+    rotations=_ca_rotations()
+    ranked=sorted([(round(_ca_orientation_affinity(src["bbox"]["dimensions"],_ca_rot_bbox(ctr["bbox"],m)),6),m) for m in rotations],key=lambda x:x[0])[:10]
+    coarse=[]
+    for affinity,m in ranked:
+        rb=_ca_rot_bbox(ctr["bbox"],m);sc=src["bbox"]["center"];cc=rb["center"]
+        opts=[]
+        for i in range(3):
+            opts.append([
+              sc[i]-cc[i],
+              src["bbox"]["min"][i]-rb["min"][i],
+              src["bbox"]["max"][i]-rb["max"][i],
+              src["bbox"]["max"][i]-rb["min"][i],
+              src["bbox"]["min"][i]-rb["max"][i]
+            ])
+        for tx in opts[0]:
+          for ty in opts[1]:
+           for tz in opts[2]:
+            t=[tx,ty,tz];met=_ca_pose_score(ctr_pts,m,t,h,src["bbox"])
+            coarse.append((met["score"]-affinity*6.0,m,t,met,affinity))
+    coarse.sort(key=lambda x:x[0],reverse=True)
+    seeds=[];seen=set()
+    for row in coarse:
+        key=tuple(round(x/4.0) for x in row[2])+(tuple(int(v) for rr in row[1] for v in rr),)
+        if key in seen:continue
+        seen.add(key);seeds.append(row)
+        if len(seeds)>=6:break
+    refined=[]
+    offsets=(-9,-6,-3,0,3,6,9)
+    for base,m,t0,met0,aff in seeds:
+      for dx in offsets:
+       for dy in offsets:
+        for dz in offsets:
+         t=[t0[0]+dx,t0[1]+dy,t0[2]+dz];met=_ca_pose_score(ctr_pts,m,t,h,src["bbox"])
+         refined.append((met["score"]-aff*6.0,m,t,met,aff))
+    refined.sort(key=lambda x:x[0],reverse=True)
+    best=refined[0] if refined else coarse[0]
+    distinct=[]
+    for row in refined[:250]:
+        if not distinct:distinct.append(row);continue
+        if all(math.dist(row[2],q[2])>5.0 or row[1]!=q[1] for q in distinct):
+            distinct.append(row)
+        if len(distinct)>=5:break
+    second=distinct[1] if len(distinct)>1 else None
+    met=best[3];gap=(best[0]-(second[0] if second else -1e9))
+    span=met.get("contact_bbox_mm",{}).get("dimensions") or [0,0,0]
+    span_axes=sum(1 for i,x in enumerate(span) if x>=max(5.0,src["bbox"]["dimensions"][i]*.07))
+    contact_ok=met.get("contact_count",0)>=max(14,int(len(ctr_pts)*.018))
+    intrusion_ok=met.get("intrusion_ratio",1)<=.22
+    span_ok=span_axes>=2
+    uniqueness_ok=second is None or gap>=max(8.0,abs(best[0])*.035)
+    confidence="HIGH" if contact_ok and intrusion_ok and span_ok and uniqueness_ok else ("MEDIUM" if contact_ok and intrusion_ok and span_ok else "LOW")
+    cbox=met.get("contact_bbox_mm") or {};cd=cbox.get("dimensions") or [0,0,0]
+    axis_i=min(range(3),key=lambda i:cd[i] if cd[i]>0 else 1e9)
+    plane=((cbox.get("min") or [0,0,0])[axis_i]+(cbox.get("max") or [0,0,0])[axis_i])/2
+    band=max(2.4,min(14.0,(cd[axis_i] if cd[axis_i]>0 else 4.0)+2.0))
+    return {
+      "status":"ALIGNED" if confidence=="HIGH" else "REVIEW_REQUIRED",
+      "version":"counterpart-alignment-v1",
+      "confidence":confidence,
+      "relation":str(relation or "support"),
+      "source":{"name":src.get("name"),"dimensions_mm":[round(x,3) for x in src["bbox"]["dimensions"]],"triangle_count":len(src["triangles"]),"file_size_bytes":sbytes},
+      "counterpart":{"name":ctr.get("name"),"dimensions_mm":[round(x,3) for x in ctr["bbox"]["dimensions"]],"triangle_count":len(ctr["triangles"]),"file_size_bytes":cbytes},
+      "transform":{"rotation_matrix":[[int(v) for v in rr] for rr in best[1]],"translation_mm":[round(x,3) for x in best[2]]},
+      "metrics":{**met,"score_gap":round(gap,3),"orientation_affinity":best[4],"distinct_solution_count":len(distinct),"checks":{"contact_support":contact_ok,"low_intrusion":intrusion_ok,"contact_span":span_ok,"solution_unique":uniqueness_ok}},
+      "interface_selection":{"axis":"XYZ"[axis_i],"plane_mm":round(plane,3),"band_mm":round(band,3),"span_mm":round(max(cd),3),"confidence":confidence,"reason":"counterpart_geometry_contact_alignment_v1"},
+      "policy":"Fail closed unless measured counterpart geometry produces a low-intrusion, spatially distributed and sufficiently unique contact solution."
+    }
+
 def _dw_face_evidence_selftest():
     body=cq.Workplane("XY").box(60,40,5,centered=(True,True,False))
     pocket=cq.Workplane("XY").workplane(offset=3.6).circle(13.2).extrude(1.6)
@@ -4091,7 +4306,7 @@ def _u_cad_evidence_binding_selftest():
     return {"status":"PASS" if all(checks.values()) else "FAIL","checks":checks,"bindings":binding_rows,"removed_volume_mm3":round(removed,3),"expected_removed_volume_mm3":round(expected,3)}
 
 class Handler(BaseHTTPRequestHandler):
-    server_version="MakerSenceCAD/2.62.0-counterpart-source-bridge"
+    server_version="MakerSenceCAD/2.63.0-counterpart-alignment"
     def log_message(self,fmt,*args):print(fmt%args,flush=True)
     def send_json(self,code,obj):
         data=json.dumps(obj,ensure_ascii=False).encode("utf-8")
@@ -4107,7 +4322,7 @@ class Handler(BaseHTTPRequestHandler):
         return True
     def do_GET(self):
         path=urlparse(self.path).path
-        if path=="/health":return self.send_json(200,{"ok":True,"service":"makersence-cad-worker","version":"2.62.0-counterpart-source-bridge","engine":"cadquery+blender+svgpathtools+shapely+pillow","blender":{"available":pathlib.Path(BLENDER_BIN).exists(),"binary":BLENDER_BIN},"bambu_slicer":{"available":bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),"engine":"Bambu Studio","version":BAMBU_VERSION},"design_model_provider":design_model_provider_status(),"capabilities":["compact_step_brep","bambu_native_parts","detachable_parts","assembly_render","product_dimensions","open_edges_zero_gate","formal_mesh_render","artifact_reaudit","rectangular_blind_pockets","geometry_intent_gate","orphan_geometry_gate","unintended_through_cut_gate","welded_3mf_meshes","exported_3mf_topology_gate","true_font_outline_text","high_smooth_vector_mesh","multilingual_font_fallback","actual_text_stroke_gate","adaptive_cjk_regular_first","cjk_internal_clearance_gate","cjk_counter_preservation_gate","text_mesh_topology_candidate_gate","remote_3mf_stream_analyzer","remote_3mf_xml_iterparse","remote_3mf_transform_aware_bounds","remote_3mf_cad_drawing_v1","remote_3mf_reconstruction_sections_v2","auto_hole_slot_detection","blind_cavity_detection_v1","planar_face_cluster_locator_v1","cavity_bottom_face_match_v1","residual_wall_normal_distance_v1","paired_plane_thickness_v1","bounded_per_part_feature_scan_v1","auto_fillet_chamfer_candidates","auto_section_view_plan","multipart_dimension_semantics","supplementary_stl_step_analyzer","remote_source_url_analyzer_v1","generic_memory_budget_v1","streaming_3mf_glb_export","source_3mf_glb_preview_v1","world_space_feature_center_v1","auto_text_boldening","typography_layout_bounds","script_aware_glyph_spacing","glyph_clearance_gate","text_readability_gate","bambu_04_text_profile","text_slicer_no_merge_gate","separate_structural_text_min_feature","arachne_text_project_settings","bambu_cli_real_slice","gcode_3mf_toolpath_gate","print_ready_plate_3mf","plate_part_coverage_gate","universal_cad_recipe_v2","cad_evidence_parametric_binding_v1","blind_cavity_recipe_cut_v1","planar_design_fidelity_artifact_gate_v1","universal_design_fidelity_artifact_gate_v1","section_loft_reconstruction_v1","section_loft_open_cavity_v2","multipart_relation_rebuild_v1","per_part_reconstruction_evidence_v1","planar_multiloop_extrusion_v1","planar_mesh_projection_fallback_v1","bambu_assembly_metadata_evidence_v1","assembly_pose_solver_v1","assembly_pose_solver_v3","mechanism_pose_brep_probe_v1","mechanism_motion_solver_v1","mechanism_motion_solver_v2","mechanism_motion_solver_v3","hinge_sweep_collision_gate_v1","terminal_stop_refinement_v1","latch_relative_pivot_engagement_v1","motion_bbox_prefilter_v1","motion_memory_checkpoint_v1","motion_exact_separation_prefilter_v1","motion_fail_closed_collision_v1","motion_early_direction_exit_v1","motion_isolated_subprocess_v1","motion_timeout_guard_v1","async_motion_jobs_v1","separate_part_mate_resolver_v1","planar_ring_opening_match_v1","faceted_mesh_brep_v1","complex_topology_mesh_fallback_v1","sealed_internal_cavity_mesh_fallback_v1","multipart_dimension_semantics_v2","source_intended_contact_qa_v1","same_root_assembly_guard_v1","axisymmetric_revolve_reconstruction_v1","bounded_inprocess_universal_jobs_v1","planar_prismatic_reconstruction_v1","commercial_visual_release_gate_v1","fail_closed_family_router_v1","svg_profile_extrusion_v1","formal_geometry_only_render_v1","text_08mm_baseline_v1","generic_blender_profile_executor_v1","generic_blender_to_cad_brep_v1","design_model_provider_router_v1","modal_triposg_provider_v1",],"profiles":["bambu_a1_mini_04"],"universal_executor_probe":{"cavity_loft_policy":UNIVERSAL_CAVITY_LOFT_POLICY,"loft_argcount":_u_loft_from_loops.__code__.co_argcount}})
+        if path=="/health":return self.send_json(200,{"ok":True,"service":"makersence-cad-worker","version":"2.63.0-counterpart-alignment","engine":"cadquery+blender+svgpathtools+shapely+pillow","blender":{"available":pathlib.Path(BLENDER_BIN).exists(),"binary":BLENDER_BIN},"bambu_slicer":{"available":bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),"engine":"Bambu Studio","version":BAMBU_VERSION},"design_model_provider":design_model_provider_status(),"capabilities":["compact_step_brep","bambu_native_parts","detachable_parts","assembly_render","product_dimensions","open_edges_zero_gate","formal_mesh_render","artifact_reaudit","rectangular_blind_pockets","geometry_intent_gate","orphan_geometry_gate","unintended_through_cut_gate","welded_3mf_meshes","exported_3mf_topology_gate","true_font_outline_text","high_smooth_vector_mesh","multilingual_font_fallback","actual_text_stroke_gate","adaptive_cjk_regular_first","cjk_internal_clearance_gate","cjk_counter_preservation_gate","text_mesh_topology_candidate_gate","remote_3mf_stream_analyzer","remote_3mf_xml_iterparse","remote_3mf_transform_aware_bounds","remote_3mf_cad_drawing_v1","remote_3mf_reconstruction_sections_v2","auto_hole_slot_detection","blind_cavity_detection_v1","planar_face_cluster_locator_v1","cavity_bottom_face_match_v1","residual_wall_normal_distance_v1","paired_plane_thickness_v1","bounded_per_part_feature_scan_v1","auto_fillet_chamfer_candidates","auto_section_view_plan","multipart_dimension_semantics","supplementary_stl_step_analyzer","remote_source_url_analyzer_v1","counterpart_alignment_v1","generic_memory_budget_v1","streaming_3mf_glb_export","source_3mf_glb_preview_v1","world_space_feature_center_v1","auto_text_boldening","typography_layout_bounds","script_aware_glyph_spacing","glyph_clearance_gate","text_readability_gate","bambu_04_text_profile","text_slicer_no_merge_gate","separate_structural_text_min_feature","arachne_text_project_settings","bambu_cli_real_slice","gcode_3mf_toolpath_gate","print_ready_plate_3mf","plate_part_coverage_gate","universal_cad_recipe_v2","cad_evidence_parametric_binding_v1","blind_cavity_recipe_cut_v1","planar_design_fidelity_artifact_gate_v1","universal_design_fidelity_artifact_gate_v1","section_loft_reconstruction_v1","section_loft_open_cavity_v2","multipart_relation_rebuild_v1","per_part_reconstruction_evidence_v1","planar_multiloop_extrusion_v1","planar_mesh_projection_fallback_v1","bambu_assembly_metadata_evidence_v1","assembly_pose_solver_v1","assembly_pose_solver_v3","mechanism_pose_brep_probe_v1","mechanism_motion_solver_v1","mechanism_motion_solver_v2","mechanism_motion_solver_v3","hinge_sweep_collision_gate_v1","terminal_stop_refinement_v1","latch_relative_pivot_engagement_v1","motion_bbox_prefilter_v1","motion_memory_checkpoint_v1","motion_exact_separation_prefilter_v1","motion_fail_closed_collision_v1","motion_early_direction_exit_v1","motion_isolated_subprocess_v1","motion_timeout_guard_v1","async_motion_jobs_v1","separate_part_mate_resolver_v1","planar_ring_opening_match_v1","faceted_mesh_brep_v1","complex_topology_mesh_fallback_v1","sealed_internal_cavity_mesh_fallback_v1","multipart_dimension_semantics_v2","source_intended_contact_qa_v1","same_root_assembly_guard_v1","axisymmetric_revolve_reconstruction_v1","bounded_inprocess_universal_jobs_v1","planar_prismatic_reconstruction_v1","commercial_visual_release_gate_v1","fail_closed_family_router_v1","svg_profile_extrusion_v1","formal_geometry_only_render_v1","text_08mm_baseline_v1","generic_blender_profile_executor_v1","generic_blender_to_cad_brep_v1","design_model_provider_router_v1","modal_triposg_provider_v1",],"profiles":["bambu_a1_mini_04"],"universal_executor_probe":{"cavity_loft_policy":UNIVERSAL_CAVITY_LOFT_POLICY,"loft_argcount":_u_loft_from_loops.__code__.co_argcount}})
         if path=="/v1/selftest/face-evidence":
             if not self.authorized():return
             return self.send_json(200,_dw_face_evidence_selftest())
@@ -4166,6 +4381,11 @@ class Handler(BaseHTTPRequestHandler):
                 if n<=0 or n>200_000:return self.send_json(400,{"error":"invalid remote source request"})
                 req=json.loads(self.rfile.read(n).decode("utf-8"))
                 out=analyze_remote_source_url(req.get("url"),req.get("format") or "",req.get("filename") or "counterpart-source")
+                return self.send_json(200,out)
+            if path=="/v1/align-counterpart":
+                if n<=0 or n>300_000:return self.send_json(400,{"error":"invalid counterpart alignment request"})
+                req=json.loads(self.rfile.read(n).decode("utf-8"))
+                out=align_counterpart_urls(req.get("source_url"),req.get("counterpart_url"),req.get("relation") or "support")
                 return self.send_json(200,out)
             if path=="/v1/resolve-mechanism-pose":
                 if n<=0 or n>2_000_000:return self.send_json(400,{"error":"invalid mechanism pose request"})
