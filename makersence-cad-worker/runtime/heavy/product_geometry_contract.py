@@ -108,12 +108,14 @@ def interface_preserving_contract_issues(contract: Any) -> list[str]:
     mode = str(_dict(geometry.get("geometry_evidence")).get("interface_mode") or scope.get("interface_mode") or "").upper()
     core = _dict(execution.get("protected_core"))
     core_id = str(core.get("part_id") or "")
+    device_reference_ids: set[str] = set()
     protected_node = next((n for n in nodes if _dict(n).get("type") == "protected_interface"
                            and str(_dict(n).get("operation") or "").upper() == "PRESERVE"), None)
 
     if mode == "DEVICE_ENVELOPE":
         reference = _dict(geometry.get("interface_reference"))
         reference_ids = {str(x) for x in _list(reference.get("part_ids")) if str(x)}
+        device_reference_ids = reference_ids
         if (str(reference.get("status") or "").upper() != "IDENTIFIED"
                 or reference.get("assembly_role") != "NON_PRINTABLE_COUNTERPART_REFERENCE"
                 or reference.get("export_policy") != "EXCLUDE_FROM_PRINTABLE_OUTPUT"
@@ -175,6 +177,12 @@ def interface_preserving_contract_issues(contract: Any) -> list[str]:
                 if state in READY_BINDING_STATES and row.get("geometry_node_id") and row.get("operation"):
                     return row
         return None
+
+    if mode == "DEVICE_ENVELOPE":
+        for item in bindings:
+            row = _dict(item)
+            if str(row.get("geometry_node_id") or "") in device_reference_ids:
+                issues.append("DEVICE_ENVELOPE_REFERENCE_BOUND_AS_PRINTABLE_GEOMETRY:" + str(row.get("geometry_node_id")))
 
     understanding = _dict(geometry.get("product_understanding_contract"))
     for zone in _list(understanding.get("functional_zones")):
