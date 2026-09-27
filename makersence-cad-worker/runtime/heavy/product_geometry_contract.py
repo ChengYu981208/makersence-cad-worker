@@ -99,7 +99,7 @@ def _valid_instance_interface_selection(value: Any, index: int) -> bool:
         row.get("instance_index") == index
         and axis in {"X", "Y", "Z"}
         and str(row.get("confidence") or "").upper() == "HIGH"
-        and row.get("coordinate_frame") == "source_largest_part_min_normalized"
+        and row.get("coordinate_frame") in {"source_largest_part_min_normalized", "source_assembly_min_normalized"}
         and plane is not None and plane >= 0
         and raw_plane is not None
         and band is not None and band > 0
