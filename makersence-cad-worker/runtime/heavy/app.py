@@ -3539,7 +3539,7 @@ def _counterpart_alignment_job_runner(jid,req):
 def _counterpart_alignment_child_cli(jid,folder):
     folder=pathlib.Path(folder);request_path=folder/"alignment_request.json";result_path=folder/"alignment_result.json"
     req=json.loads(request_path.read_text(encoding="utf-8"))
-    result=align_counterpart_urls(req.get("source_url"),req.get("counterpart_url"),req.get("relation") or "support",req.get("expected_instances",1),req.get("counterpart_context"))
+    result=align_counterpart_urls(req.get("source_url"),req.get("counterpart_url"),req.get("relation") or "support",req.get("expected_instances",1),req.get("counterpart_context"),req.get("source_part_ids"))
     out={"status":"completed","result":result,"completed_at":time.time()}
     tmp=result_path.with_suffix(".tmp");tmp.write_text(json.dumps(out,ensure_ascii=False),encoding="utf-8");tmp.replace(result_path)
     return 0
@@ -4394,11 +4394,11 @@ def _ca_instance_alignment_evidence(expected_instances,confidence,transform):
             "expected_instances":expected,"matched_instances":matched,"instance_transforms":transforms,
             "instance_solution_method":"SINGLE_INSTANCE_POSE_ONLY","instance_solution_complete":matched==expected}
 
-def align_counterpart_urls(source_url,counterpart_url,relation="support",expected_instances=1,counterpart_context=None):
+def align_counterpart_urls(source_url,counterpart_url,relation="support",expected_instances=1,counterpart_context=None,source_part_ids=None):
     try:expected_instances=max(1,min(12,int(expected_instances or 1)))
     except Exception:raise ValueError("counterpart expected_instances must be an integer from 1 to 12")
     sp,sbytes=_ca_download_3mf(source_url,"source");cp,cbytes=_ca_download_3mf(counterpart_url,"counterpart")
-    src=load_3mf_assembly_mesh(sp);ctr=_ca_largest_mesh_3mf(cp)
+    src=load_3mf_assembly_mesh(sp,root_object_ids=source_part_ids);ctr=_ca_largest_mesh_3mf(cp)
     src_surface=_ca_surface_samples(src,12000);h=_ca_hash(src_surface,5.0);ctr_pts=_ca_point_samples(ctr,900)
     rotations=_ca_rotations()
     ranked=sorted([(round(_ca_orientation_affinity(src["bbox"]["dimensions"],_ca_rot_bbox(ctr["bbox"],m)),6),m) for m in rotations],key=lambda x:x[0])[:10]
@@ -4667,6 +4667,11 @@ class Handler(BaseHTTPRequestHandler):
                 if not isinstance(req.get("counterpart_url"),str) or not req["counterpart_url"].startswith("https://"):return self.send_json(400,{"error":"counterpart_url must be https"})
                 expected=req.get("expected_instances",1)
                 if not isinstance(expected,int) or expected<1 or expected>12:return self.send_json(400,{"error":"expected_instances must be an integer from 1 to 12"})
+                source_part_ids=req.get("source_part_ids")
+                if source_part_ids is not None:
+                    if not isinstance(source_part_ids,list) or not 1<=len(source_part_ids)<=32 or any(not isinstance(x,str) or not x.strip() or len(x)>128 for x in source_part_ids):
+                        return self.send_json(400,{"error":"source_part_ids must contain 1 to 32 non-empty strings"})
+                    req["source_part_ids"]=sorted({x.strip() for x in source_part_ids})
                 return self.send_json(202,_submit_counterpart_alignment_job(req))
             if path=="/v1/align-counterpart":
                 if n<=0 or n>300_000:return self.send_json(400,{"error":"invalid counterpart alignment request"})
