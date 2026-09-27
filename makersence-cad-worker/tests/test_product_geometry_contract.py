@@ -88,7 +88,7 @@ def ready_device_envelope_contract():
     ]
     signature = geometry["design_fidelity_gate"]["required_signatures"][0]
     signature["executor_binding"] = {"operation": "BUILD_CLEARANCE_CRADLE", "geometry_node_id": "CRADLE"}
-    geometry["design_scope_contract"]["interface_mode"] = "DEVICE_ENVELOPE"
+    contract["design_scope_contract"]["interface_mode"] = "DEVICE_ENVELOPE"
     return contract
 
 class ProductGeometryContractTests(unittest.TestCase):
