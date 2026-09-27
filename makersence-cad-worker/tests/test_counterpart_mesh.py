@@ -74,6 +74,27 @@ class ThreeMFAssemblyMeshTests(unittest.TestCase):
                 root_object_ids=["99"],
             )
 
+    def test_reviewed_part_selection_keeps_only_selected_nested_component(self):
+        mesh = load_3mf_assembly_mesh(
+            self.make_model(),
+            part_object_ids=["2"],
+        )
+        self.assertEqual(mesh["assembly"]["selected_part_ids"], ["2"])
+        self.assertEqual(mesh["assembly"]["matched_part_ids"], ["2"])
+        self.assertTrue(mesh["assembly"]["part_selection_complete"])
+        self.assertEqual(mesh["assembly"]["selected_root_object_ids"], ["3"])
+        self.assertEqual(mesh["assembly"]["selected_part_object_refs"], ["3D/3dmodel.model#2"])
+        self.assertEqual(mesh["assembly"]["included_part_ids"], ["3D/3dmodel.model#2"])
+        self.assertEqual(mesh["bbox"]["min"], [20.0, 0.0, 0.0])
+        self.assertEqual(mesh["bbox"]["max"], [30.0, 10.0, 10.0])
+
+    def test_reviewed_part_selection_fails_closed_when_component_is_missing(self):
+        with self.assertRaisesRegex(ValueError, "3MF_ALIGNMENT_SELECTED_PART_MISSING:99"):
+            load_3mf_assembly_mesh(
+                self.make_model(),
+                part_object_ids=["99"],
+            )
+
     def test_rejects_assemblies_that_exceed_the_expanded_triangle_budget(self):
         with self.assertRaisesRegex(ValueError, "3MF_ALIGNMENT_EXPANDED_MESH_BUDGET_EXCEEDED"):
             load_3mf_assembly_mesh(self.make_model(), max_triangles=4)
