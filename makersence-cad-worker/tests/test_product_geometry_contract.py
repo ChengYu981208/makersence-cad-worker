@@ -49,6 +49,48 @@ def ready_contract():
     }
 
 
+
+def ready_device_envelope_contract():
+    contract = ready_contract()
+    geometry = contract["product_geometry_contract"]
+    geometry["geometry_evidence"] = {"interface_mode": "DEVICE_ENVELOPE"}
+    source = geometry["feature_graph"]["nodes"][0]
+    source["role"] = "interface"
+    geometry["feature_graph"]["nodes"].append({"id": "CRADLE", "type": "generated_geometry"})
+    geometry["feature_graph"]["nodes"][1].pop("source_part_id", None)
+    geometry["feature_graph"]["nodes"][1]["mode"] = "DEVICE_ENVELOPE"
+    geometry.pop("interface_execution", None)
+    geometry["interface_execution"] = {
+        "exterior_shell_registration": {
+            "status": "PASS", "matched_landmark_count": 3, "rms_residual_mm": 0.2,
+            "source_to_design_transform_4x4": [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]],
+        },
+        "fit_clearance_proofs": [{
+            "id": "cradle_clearance", "status": "PASS", "actual_mm": 0.25,
+            "required_mm": 0.25, "evidence_verified": True,
+        }],
+    }
+    geometry["interface_reference"] = {
+        "status": "IDENTIFIED", "mode": "DEVICE_ENVELOPE",
+        "assembly_role": "NON_PRINTABLE_COUNTERPART_REFERENCE",
+        "export_policy": "EXCLUDE_FROM_PRINTABLE_OUTPUT",
+        "part_ids": ["CORE"],
+        "alignment": {
+            "status": "ALIGNED", "confidence": "HIGH", "pose_unique": True, "solution_count": 1,
+            "selected_transform_4x4": [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]],
+            "candidate_poses": [],
+        },
+        "fit": {"xy_clearance_mm": 0.25, "calibration_status": "UNVERIFIED", "physical_validation_required": True},
+    }
+    geometry["geometry_bindings"] = [
+        {"zone_id": "cradle", "execution_state": "CAD_EXECUTOR_BOUND", "geometry_node_id": "CRADLE", "operation": "BUILD_CLEARANCE_CRADLE"},
+        {"signature_id": "sig_cradle", "execution_state": "CAD_EXECUTOR_BOUND", "geometry_node_id": "CRADLE", "operation": "BUILD_CLEARANCE_CRADLE"},
+    ]
+    signature = geometry["design_fidelity_gate"]["required_signatures"][0]
+    signature["executor_binding"] = {"operation": "BUILD_CLEARANCE_CRADLE", "geometry_node_id": "CRADLE"}
+    geometry["design_scope_contract"]["interface_mode"] = "DEVICE_ENVELOPE"
+    return contract
+
 class ProductGeometryContractTests(unittest.TestCase):
     def test_unmapped_live_shape_is_blocked_before_provider_call(self):
         contract = {
@@ -84,6 +126,31 @@ class ProductGeometryContractTests(unittest.TestCase):
         registration["source_to_design_transform_4x4"] = [[2,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]
         blockers = interface_preserving_contract_issues(contract)
         self.assertIn("EXTERIOR_SHELL_REGISTRATION_NOT_RESOLVED", blockers)
+
+    def test_device_envelope_counterpart_is_excluded_from_print_geometry(self):
+        contract = ready_device_envelope_contract()
+        self.assertEqual(interface_preserving_contract_issues(contract), [])
+        blockers = protected_rebuild_blockers(contract)
+        self.assertEqual(blockers, ["INTERFACE_PRESERVING_REBUILD_EXECUTOR_NOT_IMPLEMENTED"])
+
+        geometry = contract["product_geometry_contract"]
+        geometry["geometry_bindings"][0]["geometry_node_id"] = "CORE"
+        geometry["geometry_bindings"][0]["operation"] = "PRESERVE_SOURCE_GEOMETRY"
+        blockers = interface_preserving_contract_issues(contract)
+        self.assertIn("DEVICE_ENVELOPE_REFERENCE_BOUND_AS_PRINTABLE_GEOMETRY:CORE", blockers)
+
+    def test_device_envelope_ambiguous_pose_and_missing_export_policy_are_blocked(self):
+        contract = ready_device_envelope_contract()
+        reference = contract["product_geometry_contract"]["interface_reference"]
+        reference["alignment"]["pose_unique"] = False
+        reference["alignment"]["selected_transform_4x4"] = None
+        blockers = interface_preserving_contract_issues(contract)
+        self.assertIn("DEVICE_ENVELOPE_ALIGNMENT_UNRESOLVED", blockers)
+
+        contract = ready_device_envelope_contract()
+        contract["product_geometry_contract"]["interface_reference"].pop("export_policy")
+        blockers = interface_preserving_contract_issues(contract)
+        self.assertIn("DEVICE_ENVELOPE_REFERENCE_CLASSIFICATION_INVALID", blockers)
 
     def test_nonprotected_hybrid_contract_does_not_force_protected_route(self):
         self.assertFalse(is_interface_preserving_scope({"design_scope_contract": {"protect_mating_interface": False}}))
