@@ -4609,7 +4609,7 @@ class Handler(BaseHTTPRequestHandler):
             if not self.authorized():return
             jid=path.split("/")[-1];j=ALIGNMENT_JOBS.get(jid)
             return self.send_json(200,{"job_id":jid,**j}) if j else self.send_json(404,{"error":"counterpart alignment job not found"})
-        if path.startswith("/v1/motion-jobs/")
+        if path.startswith("/v1/motion-jobs/"):
             if not self.authorized():return
             jid=path.split("/")[-1];j=MOTION_JOBS.get(jid)
             return self.send_json(200,{"job_id":jid,**j}) if j else self.send_json(404,{"error":"motion job not found"})
