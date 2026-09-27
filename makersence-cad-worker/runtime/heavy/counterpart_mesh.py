@@ -75,14 +75,16 @@ def load_3mf_assembly_mesh(
     path: str,
     *,
     root_object_ids: list[str] | None = None,
+    part_object_ids: list[str] | None = None,
     max_vertices: int = 180_000,
     max_triangles: int = 320_000,
 ) -> dict[str, Any]:
-    """Expand selected reviewed build roots, or all roots, with component transforms.
+    """Expand reviewed build roots or reviewed part objects with transforms.
 
-    User-reviewed root IDs can exclude unrelated print-plate objects from
-    counterpart alignment. Limits apply after selected assembly instances are
-    expanded. Oversized or unresolved selections fail closed.
+    Root selection excludes unrelated print-plate objects. Part selection
+    retains only the selected component subtree inside each printable root.
+    Limits apply after selection and transforms; unresolved or ambiguous
+    selections fail closed.
     """
     if max_vertices < 4 or max_triangles < 4:
         raise ValueError("3MF_ALIGNMENT_BUDGET_INVALID")
@@ -198,19 +200,37 @@ def load_3mf_assembly_mesh(
     if not build:
         raise ValueError("3MF_ALIGNMENT_BUILD_GRAPH_EMPTY")
 
-    selected_ids: set[str] | None = None
+    if root_object_ids is not None and part_object_ids is not None:
+        raise ValueError("3MF_ALIGNMENT_ROOT_AND_PART_SELECTION_CONFLICT")
+    selected_root_ids: set[str] | None = None
+    selected_part_ids: set[str] | None = None
+    matched_selected_part_ids: set[str] = set()
+    selected_part_refs: dict[str, set[str]] = {}
+    matched_selected_root_ids: set[str] = set()
     unselected_root_count = 0
     if root_object_ids is not None:
-        selected_ids = {str(value).strip() for value in root_object_ids if str(value).strip()}
-        if not selected_ids:
+        selected_root_ids = {str(value).strip() for value in root_object_ids if str(value).strip()}
+        if not selected_root_ids:
             raise ValueError("3MF_ALIGNMENT_SELECTED_ROOT_IDS_EMPTY")
-        available_ids = {str(root.get("id") or "") for root in build}
-        missing_ids = sorted(selected_ids - available_ids)
-        if missing_ids:
-            raise ValueError("3MF_ALIGNMENT_SELECTED_ROOT_MISSING:" + ",".join(missing_ids))
+        available_root_ids = {str(root.get("id") or "") for root in build}
+        missing_root_ids = sorted(selected_root_ids - available_root_ids)
+        if missing_root_ids:
+            raise ValueError("3MF_ALIGNMENT_SELECTED_ROOT_MISSING:" + ",".join(missing_root_ids))
         original_root_count = len(build)
-        build = [root for root in build if str(root.get("id") or "") in selected_ids]
+        build = [root for root in build if str(root.get("id") or "") in selected_root_ids]
         unselected_root_count = original_root_count - len(build)
+    if part_object_ids is not None:
+        selected_part_ids = {str(value).strip() for value in part_object_ids if str(value).strip()}
+        if not selected_part_ids:
+            raise ValueError("3MF_ALIGNMENT_SELECTED_PART_IDS_EMPTY")
+        available_part_ids = {
+            str(object_id)
+            for document in docs.values()
+            for object_id in document["objects"]
+        }
+        missing_part_ids = sorted(selected_part_ids - available_part_ids)
+        if missing_part_ids:
+            raise ValueError("3MF_ALIGNMENT_SELECTED_PART_MISSING:" + ",".join(missing_part_ids))
 
     vertices: list[tuple[float, float, float]] = []
     triangles: list[tuple[int, int, int]] = []
@@ -218,7 +238,13 @@ def load_3mf_assembly_mesh(
     exact_min = [float("inf")] * 3
     exact_max = [float("-inf")] * 3
 
-    def collect(model_path: str, object_id: str, world, ancestry: frozenset[tuple[str, str]]) -> None:
+    def collect(
+        model_path: str,
+        object_id: str,
+        world,
+        ancestry: frozenset[tuple[str, str]],
+        include_selected_branch: bool = False,
+    ) -> None:
         key = (_normal_path(model_path), str(object_id))
         if key in ancestry:
             raise ValueError("3MF_ALIGNMENT_COMPONENT_CYCLE")
@@ -226,9 +252,14 @@ def load_3mf_assembly_mesh(
         if obj is None:
             raise ValueError("3MF_ALIGNMENT_COMPONENT_MISSING:" + key[0] + ":" + key[1])
         next_ancestry = ancestry | {key}
+        is_selected_part = selected_part_ids is not None and key[1] in selected_part_ids
+        if is_selected_part:
+            matched_selected_part_ids.add(key[1])
+            selected_part_refs.setdefault(key[1], set()).add(key[0] + "#" + key[1])
+        include_mesh = selected_part_ids is None or include_selected_branch or is_selected_part
         raw = obj["vertices"]
         faces = obj["triangles"]
-        if raw and faces:
+        if raw and faces and include_mesh:
             if len(vertices) + len(raw) > max_vertices or len(triangles) + len(faces) > max_triangles:
                 raise ValueError("3MF_ALIGNMENT_EXPANDED_MESH_BUDGET_EXCEEDED")
             base = len(vertices)
@@ -248,11 +279,23 @@ def load_3mf_assembly_mesh(
                 str(component.get("id") or ""),
                 _multiply(world, component["transform"]),
                 next_ancestry,
+                include_selected_branch or is_selected_part,
             )
 
     for root in build:
         root_path = _normal_path(root.get("path") or main_path)
+        before = len(included_parts)
         collect(root_path, str(root.get("id") or ""), root["transform"], frozenset())
+        if selected_part_ids is not None and len(included_parts) > before:
+            matched_selected_root_ids.add(str(root.get("id") or ""))
+
+    if selected_part_ids is not None:
+        ambiguous = sorted(part_id for part_id, refs in selected_part_refs.items() if len(refs) > 1)
+        if ambiguous:
+            raise ValueError("3MF_ALIGNMENT_SELECTED_PART_AMBIGUOUS:" + ",".join(ambiguous))
+        unresolved = sorted(selected_part_ids - matched_selected_part_ids)
+        if unresolved:
+            raise ValueError("3MF_ALIGNMENT_SELECTED_PART_UNRESOLVED:" + ",".join(unresolved))
 
     if len(vertices) < 4 or len(triangles) < 4:
         raise ValueError("3MF_ALIGNMENT_MESH_EMPTY")
@@ -273,7 +316,18 @@ def load_3mf_assembly_mesh(
             "root_count": len(build),
             "total_root_count": len(build) + unselected_root_count,
             "unselected_root_count": unselected_root_count,
-            "selected_root_object_ids": sorted(selected_ids) if selected_ids is not None else None,
+            "selected_root_object_ids": (
+                sorted(selected_root_ids) if selected_root_ids is not None
+                else sorted(matched_selected_root_ids) if selected_part_ids is not None else None
+            ),
+            "selected_part_ids": sorted(selected_part_ids) if selected_part_ids is not None else None,
+            "matched_part_ids": sorted(matched_selected_part_ids),
+            "selected_part_object_refs": sorted(
+                reference for references in selected_part_refs.values() for reference in references
+            ),
+            "part_selection_complete": (
+                selected_part_ids is None or matched_selected_part_ids == selected_part_ids
+            ),
             "part_instance_count": len(included_parts),
             "source_structure": "TRANSFORM_AWARE_3MF_BUILD_GRAPH",
             "included_part_ids": included_parts,
