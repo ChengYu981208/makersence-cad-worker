@@ -79,7 +79,7 @@ jobs:
           PY
       - name: Runtime version markers
         run: |
-          grep -F "2.64.4-transform-aware-alignment" runtime/heavy/app.py
+          grep -F "2.64.5-transform-aware-alignment" runtime/heavy/app.py
           grep -F "2.13.0-08mm-typography" runtime/cad-core-v5/app.py
           grep -F "1.1.11" runtime/slicer/app.py
           grep -F "3.2.0-inkscape-svg" app/main.py
