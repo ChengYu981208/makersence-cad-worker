@@ -207,6 +207,7 @@ def load_3mf_assembly_mesh(
     matched_selected_part_ids: set[str] = set()
     selected_part_refs: dict[str, set[str]] = {}
     matched_selected_root_ids: set[str] = set()
+    matched_selected_root_count = 0
     unselected_root_count = 0
     if root_object_ids is not None:
         selected_root_ids = {str(value).strip() for value in root_object_ids if str(value).strip()}
@@ -219,6 +220,7 @@ def load_3mf_assembly_mesh(
         original_root_count = len(build)
         build = [root for root in build if str(root.get("id") or "") in selected_root_ids]
         unselected_root_count = original_root_count - len(build)
+    total_root_count = len(build) + unselected_root_count
     if part_object_ids is not None:
         selected_part_ids = {str(value).strip() for value in part_object_ids if str(value).strip()}
         if not selected_part_ids:
@@ -288,6 +290,7 @@ def load_3mf_assembly_mesh(
         collect(root_path, str(root.get("id") or ""), root["transform"], frozenset())
         if selected_part_ids is not None and len(included_parts) > before:
             matched_selected_root_ids.add(str(root.get("id") or ""))
+            matched_selected_root_count += 1
 
     if selected_part_ids is not None:
         ambiguous = sorted(part_id for part_id, refs in selected_part_refs.items() if len(refs) > 1)
@@ -296,6 +299,7 @@ def load_3mf_assembly_mesh(
         unresolved = sorted(selected_part_ids - matched_selected_part_ids)
         if unresolved:
             raise ValueError("3MF_ALIGNMENT_SELECTED_PART_UNRESOLVED:" + ",".join(unresolved))
+        unselected_root_count = total_root_count - matched_selected_root_count
 
     if len(vertices) < 4 or len(triangles) < 4:
         raise ValueError("3MF_ALIGNMENT_MESH_EMPTY")
@@ -313,8 +317,8 @@ def load_3mf_assembly_mesh(
             "center": [(exact_min[i] + exact_max[i]) / 2.0 for i in range(3)],
         },
         "assembly": {
-            "root_count": len(build),
-            "total_root_count": len(build) + unselected_root_count,
+            "root_count": matched_selected_root_count if selected_part_ids is not None else len(build),
+            "total_root_count": total_root_count,
             "unselected_root_count": unselected_root_count,
             "selected_root_object_ids": (
                 sorted(selected_root_ids) if selected_root_ids is not None
