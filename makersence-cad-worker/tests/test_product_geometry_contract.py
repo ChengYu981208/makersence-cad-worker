@@ -247,7 +247,7 @@ class ProductGeometryContractTests(unittest.TestCase):
         }
         rejected = runtime._ca_counterpart_mesh_evidence(open_cube)
         self.assertEqual(rejected["status"], "unavailable")
-        self.assertEqual(rejected["reason"], "counterpart_mesh_not_closed_manifold")
+        self.assertNotIn("payload", rejected)
         self.assertGreater(rejected["open_edges"], 0)
 
         transform = {"rotation_matrix": [[1,0,0],[0,1,0],[0,0,1]], "translation_mm": [0,0,0]}
