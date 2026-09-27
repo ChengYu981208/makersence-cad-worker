@@ -115,10 +115,10 @@ def ready_multi_device_envelope_contract():
         "instance_interface_selections": [
             {"instance_index": 0, "axis": "Y", "plane_mm": 3, "raw_source_plane_mm": 7,
              "band_mm": 8, "span_mm": 20, "confidence": "HIGH",
-             "coordinate_frame": "source_largest_part_min_normalized", "transform_4x4": identity},
+             "coordinate_frame": "source_assembly_min_normalized", "transform_4x4": identity},
             {"instance_index": 1, "axis": "Y", "plane_mm": 5, "raw_source_plane_mm": 9,
              "band_mm": 8, "span_mm": 20, "confidence": "HIGH",
-             "coordinate_frame": "source_largest_part_min_normalized", "transform_4x4": second},
+             "coordinate_frame": "source_assembly_min_normalized", "transform_4x4": second},
         ],
         "instance_arrangement": {
             "candidate_arrangement_search_complete": True,
