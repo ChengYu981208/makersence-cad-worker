@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-from collections import OrderedDict
 from typing import Any, Callable
 
 
@@ -131,6 +130,28 @@ def _pose_manifold(state: dict[str, Any], pose: dict[str, Any]):
     return result
 
 
+def _relative_pose(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
+    """Express the right instance relative to the left in the left object's frame."""
+    left_rotation = left["rotation_matrix"]
+    right_rotation = right["rotation_matrix"]
+    relative_rotation = [
+        [
+            sum(left_rotation[k][row] * right_rotation[k][column] for k in range(3))
+            for column in range(3)
+        ]
+        for row in range(3)
+    ]
+    delta = [
+        right["translation_mm"][axis] - left["translation_mm"][axis]
+        for axis in range(3)
+    ]
+    relative_translation = [
+        sum(left_rotation[k][axis] * delta[k] for k in range(3))
+        for axis in range(3)
+    ]
+    return {"rotation_matrix": relative_rotation, "translation_mm": relative_translation}
+
+
 def _exact_mesh_clearance(a: Any, b: Any, state: dict[str, Any], required_gap: float) -> dict[str, Any] | None:
     try:
         module = state["module"]
@@ -178,7 +199,7 @@ def solve_instance_arrangement(
 
     AABB lower bounds avoid exact mesh work when they prove the required gap.
     Overlapping bounds require exact mesh clearance; incomplete or exhausted
-    searches fail closed. Cached posed meshes are capped by triangle budget.
+    searches fail closed. Relative-pose checks keep one transformed mesh resident.
     """
     try:
         expected = int(expected_instances)
@@ -247,12 +268,8 @@ def solve_instance_arrangement(
     mesh_state_checked = False
     source_triangles = source_mesh.get("triangles") if isinstance(source_mesh, dict) else None
     source_triangle_count = len(source_triangles) if source_triangles is not None else 0
-    transformed_cache_capacity = (
-        max(2, min(8, 600_000 // max(1, source_triangle_count)))
-        if source_mesh is not None else 0
-    )
+    transformed_cache_capacity = 1 if source_mesh is not None else 0
     transformed_cache_peak = 0
-    transformed: OrderedDict[int, Any] = OrderedDict()
     pair_cache: dict[tuple[int, int], dict[str, Any] | None] = {}
 
     def report_stage(name: str) -> None:
@@ -262,23 +279,14 @@ def solve_instance_arrangement(
             except Exception:
                 pass
 
-    def transformed_pose(index: int):
-        nonlocal mesh_state, mesh_state_checked, transformed_cache_peak
-        if index in transformed:
-            transformed.move_to_end(index)
-            return transformed[index]
+    def ensure_mesh_state() -> dict[str, Any] | None:
+        nonlocal mesh_state, mesh_state_checked
         if not mesh_state_checked:
             report_stage("manifold_source_start")
             mesh_state = _manifold_source(source_mesh)
             mesh_state_checked = True
             report_stage("manifold_source_ready" if mesh_state is not None else "manifold_source_unavailable")
-        result = None if mesh_state is None else _pose_manifold(mesh_state, unique[index])
-        transformed[index] = result
-        transformed.move_to_end(index)
-        while len(transformed) > transformed_cache_capacity:
-            transformed.popitem(last=False)
-        transformed_cache_peak = max(transformed_cache_peak, len(transformed))
-        return result
+        return mesh_state
 
     def pair_proof(left_index: int, right_index: int) -> dict[str, Any] | None:
         nonlocal exact_pair_checks, exhausted
@@ -301,16 +309,25 @@ def solve_instance_arrangement(
                 exhausted = True
             pair_cache[key] = None
             return None
-        left_mesh = transformed_pose(left_index)
-        right_mesh = transformed_pose(right_index)
-        if left_mesh is None or right_mesh is None:
+        state = ensure_mesh_state()
+        if state is None:
             pair_cache[key] = None
             return None
+        relative = _relative_pose(left, right)
+        report_stage("relative_pose_start")
+        relative_mesh = _pose_manifold(state, relative)
+        if relative_mesh is None:
+            report_stage("relative_pose_unavailable")
+            pair_cache[key] = None
+            return None
+        transformed_cache_peak = max(transformed_cache_peak, 1)
+        report_stage("relative_pose_ready")
         first_exact_check = exact_pair_checks == 0
         if first_exact_check:
             report_stage("exact_pair_clearance_start")
         exact_pair_checks += 1
-        proof = _exact_mesh_clearance(left_mesh, right_mesh, mesh_state, gap)
+        proof = _exact_mesh_clearance(state["base"], relative_mesh, state, gap)
+        del relative_mesh
         if first_exact_check:
             report_stage("exact_pair_clearance_complete" if proof is not None else "exact_pair_clearance_failed")
         if proof is not None:
