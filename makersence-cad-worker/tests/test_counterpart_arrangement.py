@@ -137,6 +137,21 @@ class InstanceArrangementTests(unittest.TestCase):
         )
         self.assertIsNone(rejected)
 
+    def test_zero_gap_mode_uses_scale_bounded_simplification_and_still_proves_clearance(self):
+        result = solve_instance_arrangement(
+            [mesh_candidate([0, 0, 0], 100), mesh_candidate([6, 6, 0], 99)],
+            2,
+            source_dimensions_mm=[10, 10, 10],
+            minimum_contact_count=14,
+            minimum_gap_mm=0.0,
+            source_mesh=tetra_mesh(),
+        )
+        self.assertEqual(result["status"], "ALIGNED")
+        self.assertAlmostEqual(result["simplification_tolerance_mm"], 0.05)
+        proof = result["clearance_pair_proofs"][0]
+        self.assertEqual(proof["required_gap_mm"], 0.0)
+        self.assertGreater(proof["clearance_lower_bound_mm"], 0.0)
+
     def test_exact_mesh_intersection_rejects_overlapping_shapes_with_overlapping_aabbs(self):
         result = solve_instance_arrangement(
             [mesh_candidate([0, 0, 0], 100), mesh_candidate([4, 4, 0], 99)],
