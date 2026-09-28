@@ -76,6 +76,30 @@ class InstanceArrangementTests(unittest.TestCase):
         self.assertGreaterEqual(proof["clearance_lower_bound_mm"], 0.5)
         self.assertEqual(proof["overlap_volume_mm3"], 0.0)
 
+    def test_clearance_pair_indices_follow_selected_instance_order(self):
+        candidates = [
+            mesh_candidate([0, 0, 0], 100),
+            mesh_candidate([4.5, 0, 0], 99),
+            mesh_candidate([6, 6, 0], 50),
+        ]
+        result = solve_instance_arrangement(
+            candidates,
+            2,
+            source_dimensions_mm=[10, 10, 10],
+            minimum_contact_count=14,
+            minimum_gap_mm=0.5,
+            source_mesh=tetra_mesh(),
+        )
+
+        self.assertEqual(result["status"], "ALIGNED")
+        self.assertEqual(result["matched_instances"], 2)
+        self.assertEqual(
+            result["clearance_pair_proofs"][0]["first_instance_index"], 0
+        )
+        self.assertEqual(
+            result["clearance_pair_proofs"][0]["second_instance_index"], 1
+        )
+
     def test_exact_mesh_intersection_rejects_overlapping_shapes_with_overlapping_aabbs(self):
         result = solve_instance_arrangement(
             [mesh_candidate([0, 0, 0], 100), mesh_candidate([4, 4, 0], 99)],
