@@ -4338,12 +4338,15 @@ def _ca_pose_score(points,m,t,h,src_bbox,contact_mm=1.8,near_mm=4.0):
     return {"score":round(score,4),"contact_count":c,"sample_count":n,"contact_ratio":round(cr,4),"near_ratio":round(nr,4),"intrusion_ratio":round(ir,4),"contact_bbox_mm":{"min":[round(x,3) for x in (_ca_bbox(contact)["min"] if c else [0,0,0])],"max":[round(x,3) for x in (_ca_bbox(contact)["max"] if c else [0,0,0])],"dimensions":[round(x,3) for x in span]},"pose_bbox_mm":{"min":[round(x,3) for x in b["min"]],"max":[round(x,3) for x in b["max"]],"dimensions":[round(x,3) for x in b["dimensions"]]},"axis_overlap_ratio":[round(x,3) for x in ov]}
 
 def _ca_counterpart_mesh_evidence(mesh):
-    vv=mesh.get("vertices") or []
-    tt=mesh.get("triangles") or []
+    vv=mesh.get("vertices")
+    tt=mesh.get("triangles")
+    if vv is None:vv=[]
+    if tt is None:tt=[]
     if len(tt)<4 or len(tt)>30000 or len(vv)<4 or len(vv)>18000:
         return {"status":"unavailable","reason":"counterpart_mesh_budget_exceeded","vertex_count":len(vv),"triangle_count":len(tt)}
     vertices=[]
     for p in vv:
+        if hasattr(p,"tolist"):p=p.tolist()
         if not isinstance(p,(list,tuple)) or len(p)!=3:
             return {"status":"unavailable","reason":"counterpart_mesh_vertex_invalid"}
         row=[float(x) for x in p]
@@ -4352,6 +4355,7 @@ def _ca_counterpart_mesh_evidence(mesh):
         vertices.append(row)
     triangles=[]
     for tri in tt:
+        if hasattr(tri,"tolist"):tri=tri.tolist()
         if not isinstance(tri,(list,tuple)) or len(tri)!=3:
             return {"status":"unavailable","reason":"counterpart_mesh_triangle_invalid"}
         try: row=[int(x) for x in tri]
