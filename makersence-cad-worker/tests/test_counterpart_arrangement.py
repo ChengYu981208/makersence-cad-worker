@@ -61,23 +61,35 @@ class InstanceArrangementTests(unittest.TestCase):
         self.assertEqual(result["matched_instances"], 0)
         self.assertEqual(result["reason"], "no_supported_nonoverlapping_arrangement")
 
-    def test_exact_mesh_clearance_accepts_disjoint_shapes_with_overlapping_aabbs(self):
-        result = solve_instance_arrangement(
-            [mesh_candidate([0, 0, 0], 100), mesh_candidate([6, 6, 0], 99)],
-            2,
-            source_dimensions_mm=[10, 10, 10],
-            minimum_contact_count=14,
-            minimum_gap_mm=0.5,
-            source_mesh=tetra_mesh(),
+    def test_projected_gap_accepts_disjoint_shapes_with_overlapping_aabbs(self):
+        candidates = [mesh_candidate([0, 0, 0], 100), mesh_candidate([6, 6, 0], 99)]
+        self.assertIsNone(
+            counterpart_arrangement._aabb_clearance_lower_bound(candidates[0], candidates[1])
         )
+        with patch.object(
+            counterpart_arrangement,
+            "_exact_mesh_clearance",
+            side_effect=AssertionError("a sufficient projection proof must avoid exact pair traversal"),
+        ):
+            result = solve_instance_arrangement(
+                candidates,
+                2,
+                source_dimensions_mm=[10, 10, 10],
+                minimum_contact_count=14,
+                minimum_gap_mm=0.5,
+                source_mesh=tetra_mesh(),
+            )
+
         self.assertEqual(result["status"], "ALIGNED")
-        self.assertEqual(result["instance_solution_method"], "BOUNDED_MANIFOLD3D_MESH_GAP_ARRANGEMENT_V1")
-        self.assertEqual(result["separation_proof"], "AABB_AND_MANIFOLD3D_EXACT_GAP")
+        self.assertEqual(result["instance_solution_method"], "BOUNDED_GEOMETRIC_SEPARATION_ARRANGEMENT_V1")
+        self.assertEqual(result["separation_proof"], "AABB_AND_GEOMETRIC_SEPARATION_LOWER_BOUNDS")
+        self.assertEqual(result["projection_pair_checks"], 1)
+        self.assertEqual(result["exact_pair_checks"], 0)
         proof = result["clearance_pair_proofs"][0]
-        self.assertEqual(proof["method"], "MANIFOLD3D_EXACT_MESH_GAP")
+        self.assertEqual(proof["method"], "VERTEX_PROJECTION_SEPARATION_LOWER_BOUND")
         self.assertGreaterEqual(proof["clearance_lower_bound_mm"], 0.5)
-        self.assertLessEqual(proof["search_length_mm"], 0.51)
-        self.assertEqual(proof["overlap_volume_mm3"], 0.0)
+        self.assertAlmostEqual(sum(value * value for value in proof["axis_world"]), 1.0, places=7)
+        self.assertEqual(proof["status"], "PASS")
 
     def test_clearance_pair_indices_follow_selected_instance_order(self):
         candidates = [
@@ -176,7 +188,7 @@ class InstanceArrangementTests(unittest.TestCase):
         self.assertEqual(result["transformed_pose_cache_peak"], 1)
         self.assertGreater(pose_builder.call_count, result["transformed_pose_cache_capacity"])
 
-    def test_compact_numpy_mesh_runs_exact_clearance_and_reports_stages(self):
+    def test_compact_numpy_mesh_runs_projected_clearance_and_reports_stages(self):
         import numpy as np
 
         source_mesh = tetra_mesh()
@@ -195,8 +207,11 @@ class InstanceArrangementTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "ALIGNED")
         self.assertLess(stages.index("manifold_source_start"), stages.index("manifold_source_ready"))
-        self.assertIn("exact_pair_clearance_start", stages)
-        self.assertIn("exact_pair_clearance_complete", stages)
+        self.assertIn("projection_separation_start", stages)
+        self.assertIn("projection_separation_proven", stages)
+        self.assertNotIn("exact_pair_clearance_start", stages)
+        self.assertEqual(result["projection_pair_checks"], 1)
+        self.assertEqual(result["exact_pair_checks"], 0)
 
     def test_relative_pose_matches_world_pose_pair_in_left_frame(self):
         left_rotation = [[0, -1, 0], [1, 0, 0], [0, 0, 1]]
