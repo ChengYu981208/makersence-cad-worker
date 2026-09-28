@@ -333,7 +333,7 @@ def solve_instance_arrangement(
         nonlocal mesh_state, mesh_state_checked, source_mesh
         if not mesh_state_checked:
             report_stage("manifold_source_start")
-            simplification_tolerance = min(0.05, max(0.0005, gap * 0.1))
+            simplification_tolerance = min(0.1, max(0.05, gap * 0.1))
             mesh_state = _manifold_source(
                 source_mesh,
                 simplification_tolerance,
