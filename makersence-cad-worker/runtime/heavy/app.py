@@ -4420,6 +4420,7 @@ def align_counterpart_urls(source_url,counterpart_url,relation="support",expecte
     src=load_3mf_assembly_mesh(sp,part_object_ids=source_part_ids);ctr=_ca_largest_mesh_3mf(cp)
     source_vertex_count=len(src.get("vertices") or []);source_triangle_count=len(src.get("triangles") or [])
     counterpart_vertex_count=len(ctr.get("vertices") or []);counterpart_triangle_count=len(ctr.get("triangles") or [])
+    counterpart_mesh_evidence=_ca_counterpart_mesh_evidence(ctr)
     _counterpart_alignment_stage("meshes_loaded:source_v="+str(source_vertex_count)+":source_t="+str(source_triangle_count)+":counterpart_v="+str(counterpart_vertex_count)+":counterpart_t="+str(counterpart_triangle_count))
     src_surface=_ca_surface_samples(src,12000);h=_ca_hash(src_surface,5.0);del src_surface
     ctr_pts=_ca_point_samples(ctr,900)
@@ -4515,6 +4516,7 @@ def align_counterpart_urls(source_url,counterpart_url,relation="support",expecte
             minimum_gap_mm=0.0,
             maximum_intrusion_ratio=.22,
             source_mesh=ctr,
+            consume_source_mesh=True,
             max_exact_pair_checks=500,
             stage_callback=_counterpart_alignment_stage,
         )
@@ -4563,11 +4565,11 @@ def align_counterpart_urls(source_url,counterpart_url,relation="support",expecte
     return {
       "status":instance_alignment["status"],
       "version":"counterpart-alignment-v1",
-      "algorithm_version":"counterpart-alignment-v4-exact-mesh-gap-bounded",
+      "algorithm_version":"counterpart-alignment-v5-certified-simplified-gap",
       "confidence":confidence,
       "relation":str(relation or "support"),
       "source":{"name":src.get("name"),"dimensions_mm":[round(x,3) for x in src["bbox"]["dimensions"]],"triangle_count":source_triangle_count,"file_size_bytes":sbytes,"assembly":src.get("assembly")},
-      "counterpart":{"name":ctr.get("name"),"dimensions_mm":[round(x,3) for x in ctr["bbox"]["dimensions"]],"triangle_count":counterpart_triangle_count,"file_size_bytes":cbytes,"identity":{k:str((counterpart_context or {}).get(k) or "")[:160] for k in ("model_id","profile_id","instance_id") if (counterpart_context or {}).get(k)},"geometry_evidence":{"mesh_brep":_ca_counterpart_mesh_evidence(ctr)}},
+      "counterpart":{"name":ctr.get("name"),"dimensions_mm":[round(x,3) for x in ctr["bbox"]["dimensions"]],"triangle_count":counterpart_triangle_count,"file_size_bytes":cbytes,"identity":{k:str((counterpart_context or {}).get(k) or "")[:160] for k in ("model_id","profile_id","instance_id") if (counterpart_context or {}).get(k)},"geometry_evidence":{"mesh_brep":counterpart_mesh_evidence}},
       "expected_instances":instance_alignment["expected_instances"],"matched_instances":instance_alignment["matched_instances"],"instance_transforms":instance_alignment["instance_transforms"],"instance_solution_method":instance_alignment["instance_solution_method"],"instance_solution_complete":instance_alignment["instance_solution_complete"],"instance_arrangements":instance_alignment.get("candidate_arrangements",[]),"instance_interface_selections":instance_interface_selections,
       "transform":{"rotation_matrix":[[int(v) for v in rr] for rr in primary_m],"translation_mm":[round(x,3) for x in primary_t]},
       "metrics":{**met,"score_gap":round(gap,3),"orientation_affinity":best[4],"distinct_solution_count":len(distinct),"instance_arrangement":{"reason":instance_alignment.get("reason"),"separation_proof":instance_alignment.get("separation_proof"),"uniqueness_basis":instance_alignment.get("uniqueness_basis"),"candidate_arrangement_search_complete":instance_alignment.get("candidate_arrangement_search_complete"),"search_nodes":instance_alignment.get("search_nodes"),"supported_pose_count":instance_alignment.get("supported_pose_count"),"minimum_instance_gap_mm":instance_alignment.get("minimum_instance_gap_mm"),"clearance_pair_proofs":instance_alignment.get("clearance_pair_proofs",[]),"exact_pair_checks":instance_alignment.get("exact_pair_checks"),"score_gap":instance_alignment.get("arrangement_score_gap")},"checks":{"contact_support":contact_ok,"low_intrusion":intrusion_ok,"contact_span":span_ok,"single_pose_solution_unique":pose_uniqueness_ok,"solution_unique":uniqueness_ok,"instance_arrangement_complete":instance_alignment.get("instance_solution_complete",False)},"solutions":solution_rows},

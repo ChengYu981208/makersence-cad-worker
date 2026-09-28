@@ -62,21 +62,29 @@ class InstanceArrangementTests(unittest.TestCase):
         self.assertEqual(result["reason"], "no_supported_nonoverlapping_arrangement")
 
     def test_exact_mesh_clearance_accepts_disjoint_shapes_with_overlapping_aabbs(self):
+        source_mesh = tetra_mesh()
         result = solve_instance_arrangement(
             [mesh_candidate([0, 0, 0], 100), mesh_candidate([6, 6, 0], 99)],
             2,
             source_dimensions_mm=[10, 10, 10],
             minimum_contact_count=14,
             minimum_gap_mm=0.5,
-            source_mesh=tetra_mesh(),
+            source_mesh=source_mesh,
+            consume_source_mesh=True,
         )
+        self.assertIsNone(source_mesh["vertices"])
+        self.assertIsNone(source_mesh["triangles"])
         self.assertEqual(result["status"], "ALIGNED")
         self.assertEqual(result["instance_solution_method"], "BOUNDED_MANIFOLD3D_MESH_GAP_ARRANGEMENT_V1")
-        self.assertEqual(result["separation_proof"], "AABB_AND_MANIFOLD3D_EXACT_GAP")
+        self.assertEqual(result["separation_proof"], "AABB_AND_MANIFOLD3D_CONSERVATIVE_GAP")
         proof = result["clearance_pair_proofs"][0]
-        self.assertEqual(proof["method"], "MANIFOLD3D_EXACT_MESH_GAP")
+        self.assertEqual(proof["method"], "MANIFOLD3D_SIMPLIFIED_EXACT_MESH_GAP")
         self.assertGreaterEqual(proof["clearance_lower_bound_mm"], 0.5)
-        self.assertLessEqual(proof["search_length_mm"], 0.51)
+        self.assertAlmostEqual(proof["surface_approximation_error_bound_mm"], 0.05)
+        self.assertGreaterEqual(
+            proof["search_length_mm"],
+            proof["required_gap_mm"] + 2 * proof["surface_approximation_error_bound_mm"],
+        )
         self.assertEqual(proof["overlap_volume_mm3"], 0.0)
 
     def test_clearance_pair_indices_follow_selected_instance_order(self):
@@ -102,6 +110,47 @@ class InstanceArrangementTests(unittest.TestCase):
         self.assertEqual(
             result["clearance_pair_proofs"][0]["second_instance_index"], 1
         )
+
+    def test_simplified_exact_gap_subtracts_both_surface_error_bounds(self):
+        class GapMesh:
+            def __init__(self, measured):
+                self.measured = measured
+                self.search_length = None
+
+            def min_gap(self, _other, search_length):
+                self.search_length = search_length
+                return min(self.measured, search_length)
+
+        state = {"simplification_tolerance_mm": 0.025}
+        enough_clearance = GapMesh(0.5)
+        proof = counterpart_arrangement._exact_mesh_clearance(
+            enough_clearance, object(), state, 0.25
+        )
+        self.assertIsNotNone(proof)
+        self.assertAlmostEqual(enough_clearance.search_length, 0.31)
+        self.assertAlmostEqual(proof["clearance_lower_bound_mm"], 0.26)
+        self.assertEqual(proof["separation_basis"], "SIMPLIFICATION_HAUSDORFF_ERROR_BOUND")
+
+        insufficient_clearance = GapMesh(0.29)
+        rejected = counterpart_arrangement._exact_mesh_clearance(
+            insufficient_clearance, object(), state, 0.25
+        )
+        self.assertIsNone(rejected)
+
+    def test_zero_gap_mode_uses_scale_bounded_simplification_and_still_proves_clearance(self):
+        result = solve_instance_arrangement(
+            [mesh_candidate([0, 0, 0], 100), mesh_candidate([6, 6, 0], 99)],
+            2,
+            source_dimensions_mm=[10, 10, 10],
+            minimum_contact_count=14,
+            minimum_gap_mm=0.0,
+            source_mesh=tetra_mesh(),
+        )
+        self.assertEqual(result["status"], "ALIGNED")
+        self.assertAlmostEqual(result["simplification_tolerance_mm"], 0.05)
+        proof = result["clearance_pair_proofs"][0]
+        self.assertEqual(proof["required_gap_mm"], 0.0)
+        self.assertGreater(proof["clearance_lower_bound_mm"], 0.0)
 
     def test_exact_mesh_intersection_rejects_overlapping_shapes_with_overlapping_aabbs(self):
         result = solve_instance_arrangement(
