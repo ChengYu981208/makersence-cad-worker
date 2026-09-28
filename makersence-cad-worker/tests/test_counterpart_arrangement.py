@@ -171,8 +171,8 @@ class InstanceArrangementTests(unittest.TestCase):
                 max_exact_pair_checks=100,
             )
 
-        self.assertEqual(result["transformed_pose_cache_capacity"], 8)
-        self.assertEqual(result["transformed_pose_cache_peak"], 8)
+        self.assertEqual(result["transformed_pose_cache_capacity"], 1)
+        self.assertEqual(result["transformed_pose_cache_peak"], 1)
         self.assertGreater(pose_builder.call_count, result["transformed_pose_cache_capacity"])
 
     def test_compact_numpy_mesh_runs_exact_clearance_and_reports_stages(self):
@@ -196,6 +196,36 @@ class InstanceArrangementTests(unittest.TestCase):
         self.assertLess(stages.index("manifold_source_start"), stages.index("manifold_source_ready"))
         self.assertIn("exact_pair_clearance_start", stages)
         self.assertIn("exact_pair_clearance_complete", stages)
+
+    def test_relative_pose_matches_world_pose_pair_in_left_frame(self):
+        left_rotation = [[0, -1, 0], [1, 0, 0], [0, 0, 1]]
+        right_rotation = [[-1, 0, 0], [0, -1, 0], [0, 0, 1]]
+        left = {"rotation_matrix": left_rotation, "translation_mm": [10, 20, 3]}
+        right = {"rotation_matrix": right_rotation, "translation_mm": [8, 22, 7]}
+        relative = counterpart_arrangement._relative_pose(left, right)
+        point = [2, 3, 4]
+
+        world_left = [
+            sum(left_rotation[row][col] * point[col] for col in range(3)) + left["translation_mm"][row]
+            for row in range(3)
+        ]
+        world_right = [
+            sum(right_rotation[row][col] * point[col] for col in range(3)) + right["translation_mm"][row]
+            for row in range(3)
+        ]
+        world_right_in_left_frame = [
+            sum(left_rotation[row][axis] * (world_right[row] - left["translation_mm"][row]) for row in range(3))
+            for axis in range(3)
+        ]
+        relative_point = [
+            sum(relative["rotation_matrix"][row][col] * point[col] for col in range(3))
+            + relative["translation_mm"][row]
+            for row in range(3)
+        ]
+
+        self.assertEqual(world_left, [7, 22, 7])
+        for actual, expected in zip(relative_point, world_right_in_left_frame):
+            self.assertAlmostEqual(actual, expected)
 
     def test_invalid_rigid_transform_is_rejected(self):
         scale = [[2, 0, 0], [0, 1, 0], [0, 0, 1]]
