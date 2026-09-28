@@ -7,7 +7,7 @@ from urllib.request import Request, urlopen
 
 # Alignment only needs the mesh parser and bounded Manifold checks. It runs in
 # a subprocess beside the long-lived CAD service, so avoid loading OpenCascade,
-# Pillow, SVG, and Shapely into a second process under the 1 GB container cap.
+# Pillow, SVG, and Shapely into a second process under the configured worker memory cap.
 COUNTERPART_ALIGNMENT_CHILD_MODE = len(sys.argv) >= 4 and sys.argv[1] == "--counterpart-alignment-child"
 if COUNTERPART_ALIGNMENT_CHILD_MODE:
     print("COUNTERPART_ALIGNMENT_STAGE:bootstrap:lightweight_imports", flush=True)
@@ -29,6 +29,7 @@ if not COUNTERPART_ALIGNMENT_CHILD_MODE:
 
 TOKEN=os.environ.get("WORKER_TOKEN","")
 PORT=int(os.environ.get("PORT","8000"))
+HIGH_MEMORY_PROFILE=os.environ.get("MAKERSENCE_HEAVY_MEMORY_PROFILE","").strip().lower()=="github-actions-16gb"
 ROOT=pathlib.Path("/tmp/makersence_jobs")
 ROOT.mkdir(parents=True,exist_ok=True)
 JOBS={}
@@ -64,10 +65,13 @@ def resource_policy(req):
     c=req.get("cad_contract") or {}
     p=c.get("resource_policy") or {}
     family=str(c.get("family") or "")
-    if family=="universal_cad_recipe":
-        # Railway production workers have ~1 GB RAM. Keep a conservative cgroup
-        # headroom, but do not reject healthy jobs solely because Python/OCCT RSS
-        # retains shared/native pages above the old 760 MB self-imposed ceiling.
+    if HIGH_MEMORY_PROFILE:
+        # GitHub's public standard Linux runner has 16 GB RAM. Leave 2 GB for
+        # the OS and container runtime instead of applying the 1 GB service cap.
+        soft=max(2048.0,min(13312.0,f(os.environ.get("MAKERSENCE_HEAVY_MEMORY_SOFT_LIMIT_MB"),12288.0)))
+        hard=max(soft+512.0,min(14336.0,f(os.environ.get("MAKERSENCE_HEAVY_MEMORY_HARD_LIMIT_MB"),14336.0)))
+    elif family=="universal_cad_recipe":
+        # Small production workers retain a conservative cgroup headroom.
         soft=max(620.0,min(780.0,f(p.get("memory_soft_limit_mb"),700)))
         hard=max(820.0,min(920.0,f(p.get("memory_hard_limit_mb"),900)))
         if hard<=soft+64:hard=min(920.0,soft+96.0)
@@ -85,18 +89,16 @@ def resource_policy(req):
 def effective_mesh_tolerance(c):
     requested=max(.02,min(.08,f((c or {}).get("mesh_tolerance_mm"),.06)))
     family=str((c or {}).get("family") or "")
-    # A1 mini 0.4 mm: 0.05 mm chord tolerance is already substantially finer
-    # than printable XY detail. Keeping complex organic surfaces below this
-    # multiplies tessellation RAM without improving the printed contour.
-    if family=="universal_cad_recipe":return max(.08,requested)
+    # The 1 GB profile uses a coarser floor to control tessellation memory.
+    # A high-memory runner honors the requested export tolerance.
+    if family=="universal_cad_recipe" and not HIGH_MEMORY_PROFILE:return max(.08,requested)
     return requested
 
 def effective_validation_mesh_tolerance(c):
     export_tol=effective_mesh_tolerance(c)
     family=str((c or {}).get("family") or "")
-    # Intermediate QA mesh may be coarser because the exported 3MF is audited
-    # again at export_tol. BREP validity, clearances and collisions remain CAD-based.
-    if family=="universal_cad_recipe":return max(.12,export_tol)
+    # Low-memory QA mesh may be coarser; high-memory validation uses export tolerance.
+    if family=="universal_cad_recipe" and not HIGH_MEMORY_PROFILE:return max(.12,export_tol)
     return export_tol
 
 def _malloc_trim():
