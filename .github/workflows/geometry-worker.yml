@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 concurrency:
   group: makersence-precise-geometry-${{ github.ref }}
@@ -60,7 +61,6 @@ jobs:
         id: claim
         if: steps.queue.outputs.skip != 'true'
         env:
-          MAKERSENCE_GEOMETRY_RUNNER_KEY: ${{ secrets.MAKERSENCE_GEOMETRY_RUNNER_KEY }}
           TASK_ID: ${{ steps.queue.outputs.task_id }}
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
@@ -71,12 +71,20 @@ jobs:
           const fs=require('fs');
           const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
           function fail(message){throw new Error(message)}
-          function signingKey(){
-            const raw=String(process.env.MAKERSENCE_GEOMETRY_RUNNER_KEY||'').trim();
-            if(!raw)fail('runner signing key unavailable');
-            const master=/^[0-9a-f]{64}$/i.test(raw)?Buffer.from(raw,'hex'):Buffer.from(raw,'base64');
-            if(master.length!==32)fail('runner signing key invalid');
-            return crypto.createHmac('sha256',master).update('MAKERSENCE_GITHUB_GEOMETRY_HMAC_V1').digest().toString('hex');
+          async function requestOidcToken(){
+            const endpoint=String(process.env.ACTIONS_ID_TOKEN_REQUEST_URL||'');
+            const requestToken=String(process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN||'');
+            if(!endpoint||!requestToken)fail('GitHub OIDC token service unavailable');
+            const tokenUrl=new URL(endpoint);
+            tokenUrl.searchParams.set('audience','https://makersence.hatchable.site/api/research/github-runner');
+            let response;
+            try{
+              response=await fetch(tokenUrl,{headers:{Authorization:'Bearer '+requestToken,Accept:'application/json'},signal:AbortSignal.timeout(15000)});
+            }catch{fail('GitHub OIDC token request failed')}
+            if(!response.ok)fail('GitHub OIDC token request rejected');
+            const token=String((await response.json())?.value||'');
+            if(!token)fail('GitHub OIDC token response was empty');
+            return token;
           }
           async function main(){
             const task=String(process.env.TASK_ID||'');
@@ -85,13 +93,12 @@ jobs:
             const body=JSON.stringify(payload);
             const secret=signingKey();
             for(let attempt=0;attempt<180;attempt++){
-              const timestamp=String(Math.floor(Date.now()/1000));
-              const signature=crypto.createHmac('sha256',Buffer.from(secret,'utf8')).update(timestamp+'.'+body).digest('hex');
+              const oidcToken=await requestOidcToken();
               let response;
               try{
                 response=await fetch('https://makersence.hatchable.site/api/research/github-runner-claim',{
                   method:'POST',
-                  headers:{'Content-Type':'application/json','X-MakerSence-Timestamp':timestamp,'X-MakerSence-Signature':signature},
+                  headers:{'Content-Type':'application/json','Authorization':'Bearer '+oidcToken},
                   body,
                   signal:AbortSignal.timeout(15000)
                 });
@@ -182,26 +189,34 @@ jobs:
       - name: Return signed result to MakerSence Hub
         if: always() && steps.claim.outcome == 'success'
         env:
-          MAKERSENCE_GEOMETRY_RUNNER_KEY: ${{ secrets.MAKERSENCE_GEOMETRY_RUNNER_KEY }}
           TASK_ID: ${{ steps.queue.outputs.task_id }}
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
+          COMMIT_SHA: ${{ github.sha }}
           ALIGN_OUTCOME: ${{ steps.align.outcome }}
         run: |
           node <<'NODE'
           const crypto=require('crypto');
           const fs=require('fs');
           const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
-          function signingKey(){
-            const raw=String(process.env.MAKERSENCE_GEOMETRY_RUNNER_KEY||'').trim();
-            if(!raw)throw new Error('missing key');
-            const master=/^[0-9a-f]{64}$/i.test(raw)?Buffer.from(raw,'hex'):Buffer.from(raw,'base64');
-            if(master.length!==32)throw new Error('invalid key');
-            return crypto.createHmac('sha256',master).update('MAKERSENCE_GITHUB_GEOMETRY_HMAC_V1').digest().toString('hex');
+          async function requestOidcToken(){
+            const endpoint=String(process.env.ACTIONS_ID_TOKEN_REQUEST_URL||'');
+            const requestToken=String(process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN||'');
+            if(!endpoint||!requestToken)fail('GitHub OIDC token service unavailable');
+            const tokenUrl=new URL(endpoint);
+            tokenUrl.searchParams.set('audience','https://makersence.hatchable.site/api/research/github-runner');
+            let response;
+            try{
+              response=await fetch(tokenUrl,{headers:{Authorization:'Bearer '+requestToken,Accept:'application/json'},signal:AbortSignal.timeout(15000)});
+            }catch{fail('GitHub OIDC token request failed')}
+            if(!response.ok)fail('GitHub OIDC token request rejected');
+            const token=String((await response.json())?.value||'');
+            if(!token)fail('GitHub OIDC token response was empty');
+            return token;
           }
           async function main(){
             const success=process.env.ALIGN_OUTCOME==='success';
-            let payload={task_id:String(process.env.TASK_ID||''),run_id:String(process.env.RUN_ID||''),run_attempt:Number(process.env.RUN_ATTEMPT||0),status:success?'completed':'failed'};
+            let payload={task_id:String(process.env.TASK_ID||''),run_id:String(process.env.RUN_ID||''),run_attempt:Number(process.env.RUN_ATTEMPT||0),sha:String(process.env.COMMIT_SHA||''),status:success?'completed':'failed'};
             if(success){
               const result=JSON.parse(fs.readFileSync('/tmp/makersence-alignment-result.json','utf8'));
               payload.alignment=result;
@@ -211,13 +226,12 @@ jobs:
             const body=JSON.stringify(payload);
             const secret=signingKey();
             for(let attempt=0;attempt<12;attempt++){
-              const timestamp=String(Math.floor(Date.now()/1000));
-              const signature=crypto.createHmac('sha256',Buffer.from(secret,'utf8')).update(timestamp+'.'+body).digest('hex');
+              const oidcToken=await requestOidcToken();
               let response;
               try{
                 response=await fetch('https://makersence.hatchable.site/api/research/github-runner-result',{
                   method:'POST',
-                  headers:{'Content-Type':'application/json','X-MakerSence-Timestamp':timestamp,'X-MakerSence-Signature':signature},
+                  headers:{'Content-Type':'application/json','Authorization':'Bearer '+oidcToken},
                   body,
                   signal:AbortSignal.timeout(15000)
                 });
