@@ -22,7 +22,7 @@ concurrency:
 
 jobs:
   validate-workflow:
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -43,7 +43,7 @@ jobs:
           docker run --rm --entrypoint python makersence-heavy-geometry -c 'from pathlib import Path; p=Path("/app/app.py").read_text(); assert "--counterpart-alignment-child" in p and "counterpart-alignment-v4-exact-mesh-gap-bounded" in p and "alignment_result.json" in p; print("Pinned Heavy Worker alignment child is present.")'
 
   run-one-geometry-task:
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -52,138 +52,159 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Claim one short-lived geometry task
+      - name: Claim one geometry task from the durable MakerSence Hub queue
         id: claim
+        env:
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          COMMIT_SHA: ${{ github.sha }}
         shell: bash
         run: |
           node <<'NODE'
           const fs = require('fs');
-          const path = require('path');
-          const gateway = 'https://lux3d-secure-relay.hatchable.site/api/makersence-runner';
-          const audience = gateway;
-          function stop() { console.error('Geometry task claim failed; request details were withheld.'); process.exitCode = 1; }
-          async function oidcToken() {
+          const hub = 'https://makersence.hatchable.site';
+          const audience = hub + '/api/research/github-runner';
+          function fail(code) { throw new Error(code); }
+          async function getOidcToken() {
             const endpoint = String(process.env.ACTIONS_ID_TOKEN_REQUEST_URL || '');
             const requestToken = String(process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN || '');
-            if (!endpoint || !requestToken) throw new Error('OIDC_UNAVAILABLE');
+            if (!endpoint || !requestToken) fail('OIDC_UNAVAILABLE');
             const url = new URL(endpoint);
             url.searchParams.set('audience', audience);
             const response = await fetch(url, {
               headers: { Authorization: 'Bearer ' + requestToken, Accept: 'application/json' },
               signal: AbortSignal.timeout(15000)
             });
-            if (!response.ok) throw new Error('OIDC_REQUEST_FAILED');
+            if (!response.ok) fail('OIDC_REQUEST_FAILED');
             const token = String((await response.json()).value || '');
-            if (!token) throw new Error('OIDC_TOKEN_EMPTY');
+            if (!token) fail('OIDC_TOKEN_EMPTY');
             return token;
           }
           async function main() {
-            const token = await oidcToken();
-            const body = {
-              action: 'claim',
-              run_id: String(process.env.GITHUB_RUN_ID || ''),
-              run_attempt: Number(process.env.GITHUB_RUN_ATTEMPT || 0),
-              sha: String(process.env.GITHUB_SHA || '')
-            };
-            const response = await fetch(gateway, {
+            const token = await getOidcToken();
+            const response = await fetch(hub + '/api/research/github-runner-claim', {
               method: 'POST',
               headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
-              body: JSON.stringify(body),
+              body: JSON.stringify({
+                run_id: String(process.env.RUN_ID || ''),
+                run_attempt: Number(process.env.RUN_ATTEMPT || 0),
+                sha: String(process.env.COMMIT_SHA || '')
+              }),
               signal: AbortSignal.timeout(20000)
             });
             const contentType = String(response.headers.get('content-type') || '').toLowerCase();
-            if (!contentType.includes('application/json')) {
-              if (![200, 301, 302, 401, 403].includes(response.status)) throw new Error('GATEWAY_RESPONSE_NOT_JSON');
-              fs.appendFileSync(process.env.GITHUB_OUTPUT, 'claimed=false\n');
-              console.log('Gateway is not publicly reachable yet; no task was claimed.');
-              return;
-            }
-            if (!response.ok) throw new Error('GATEWAY_HTTP_' + response.status);
+            if (!contentType.includes('application/json')) fail('HUB_RESPONSE_NOT_JSON');
             const result = await response.json();
-            if (!result.ok) throw new Error('GATEWAY_REJECTED');
-            if (!result.task) {
-              fs.appendFileSync(process.env.GITHUB_OUTPUT, 'claimed=false\n');
+            if (response.status === 202 && result.status === 'not_ready') {
+              fs.appendFileSync(process.env.GITHUB_OUTPUT, ['claimed=false', ''].join(String.fromCharCode(10)));
               console.log('No geometry task is waiting.');
               return;
             }
-            const task = result.task;
-            if (!/^[a-f0-9]{32}$/.test(String(task.task_id || ''))) throw new Error('TASK_ID_INVALID');
-            const request = task.request || {};
+            if (!response.ok || !result.ok) fail('HUB_CLAIM_REJECTED');
+            const taskId = String(result.task_id || '');
+            const request = result.request || {};
+            if (!/^[a-f0-9]{32}$/.test(taskId)) fail('TASK_ID_INVALID');
             for (const key of ['source_url', 'counterpart_url']) {
               const value = String(request[key] || '');
-              if (!value.startsWith('https://') || value.length > 4096) throw new Error('GEOMETRY_URL_INVALID');
+              if (!value.startsWith('https://') || value.length > 4096) fail('GEOMETRY_URL_INVALID');
             }
-            if (!Number.isInteger(request.expected_instances) || request.expected_instances < 1 || request.expected_instances > 12) throw new Error('INSTANCE_COUNT_INVALID');
-            const out = path.join(process.env.RUNNER_TEMP, 'makersence_geometry', task.task_id);
-            fs.mkdirSync(out, { recursive: true, mode: 0o700 });
-            fs.appendFileSync(process.env.GITHUB_OUTPUT, 'task_id=' + task.task_id + '\nclaimed=true\n');
-            fs.writeFileSync(path.join(out, 'alignment_request.json'), JSON.stringify(request), { mode: 0o600 });
-            console.log('Claimed one geometry task; signed URLs were not logged.');
+            if (!Number.isInteger(request.expected_instances) || request.expected_instances < 1 || request.expected_instances > 12) fail('EXPECTED_INSTANCES_INVALID');
+            fs.writeFileSync('/tmp/makersence-alignment-request.json', JSON.stringify(request), { mode: 0o600 });
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, ['claimed=true', 'task_id=' + taskId, ''].join(String.fromCharCode(10)));
+            console.log('A signed geometry task was claimed; request details were withheld.');
           }
-          main().catch(stop);
+          main().catch(() => { console.error('Hub task claim failed; request details were withheld.'); process.exitCode = 1; });
           NODE
 
-      - name: Check out pinned Heavy Worker source
+      - name: Check out the pinned Heavy Worker source
         if: steps.claim.outputs.claimed == 'true'
         uses: actions/checkout@v4
         with:
           ref: 6c3d8801e7118cd42d58468adc939820af953cd1
           path: worker
 
-      - name: Build Heavy Worker container
+      - name: Build the Heavy Worker container
         if: steps.claim.outputs.claimed == 'true'
         run: docker build --pull -f worker/makersence-cad-worker/runtime/heavy/Dockerfile -t makersence-heavy-geometry worker/makersence-cad-worker/runtime/heavy
 
-      - name: Run full-resolution geometry alignment
+      - name: Start the isolated Heavy Worker
+        if: steps.claim.outputs.claimed == 'true'
+        run: |
+          docker run -d --name makersence-heavy-geometry \
+            -e WORKER_TOKEN=ephemeral-github-runner-token \
+            -e PORT=8000 \
+            -e MAKERSENCE_HEAVY_CONCURRENCY=1 \
+            -p 18000:8000 \
+            makersence-heavy-geometry
+
+      - name: Wait for the Worker health check
+        if: steps.claim.outputs.claimed == 'true'
+        run: |
+          python - <<'PY'
+          import json,time,urllib.request
+          for _ in range(180):
+              try:
+                  with urllib.request.urlopen("http://127.0.0.1:18000/health",timeout=3) as r:
+                      health=json.load(r)
+                  if health.get("ok"):
+                      print("Heavy Worker is ready.")
+                      break
+              except Exception:
+                  time.sleep(1)
+          else:
+              raise SystemExit("Heavy Worker health check timed out.")
+          PY
+
+      - name: Run exact source and counterpart mesh alignment
         id: align
         if: steps.claim.outputs.claimed == 'true'
-        env:
-          TASK_ID: ${{ steps.claim.outputs.task_id }}
-        shell: bash
         run: |
-          set -euo pipefail
-          task_dir="${RUNNER_TEMP}/makersence_geometry/${TASK_ID}"
-          mkdir -p "${task_dir}"
-          if docker run --rm --volume "${task_dir}:/task" makersence-heavy-geometry \
-            python /app/app.py --counterpart-alignment-child "${TASK_ID}" /task \
-            >"${task_dir}/worker.log" 2>&1; then
-            python - "${task_dir}/alignment_result.json" "${task_dir}/alignment.json" <<'PY'
-          import json,sys
-          source,dest=sys.argv[1],sys.argv[2]
-          with open(source,encoding="utf-8") as f: wrapper=json.load(f)
-          alignment=wrapper.get("result")
-          if wrapper.get("status")!="completed" or not isinstance(alignment,dict):
-              raise SystemExit("Alignment result is missing.")
-          if alignment.get("algorithm_version")!="counterpart-alignment-v4-exact-mesh-gap-bounded":
-              raise SystemExit("Alignment algorithm version is invalid.")
-          if alignment.get("status") not in ("ALIGNED","REVIEW_REQUIRED"):
-              raise SystemExit("Alignment status is invalid.")
-          try: triangles=float((alignment.get("source") or {}).get("triangle_count") or 0)
-          except Exception: triangles=0
-          if triangles<=0: raise SystemExit("Full-resolution source geometry evidence is missing.")
-          data=json.dumps(alignment,separators=(",",":"),ensure_ascii=False).encode("utf-8")
-          if len(data)>800000: raise SystemExit("Alignment evidence exceeds the allowed size.")
-          with open(dest,"wb") as f: f.write(data)
-          print("Full-resolution alignment completed; geometry details were withheld.")
+          python - <<'PY'
+          import json,time,urllib.request
+          base="http://127.0.0.1:18000"
+          token="ephemeral-github-runner-token"
+          try:
+              request=json.load(open("/tmp/makersence-alignment-request.json",encoding="utf-8"))
+              body=json.dumps(request,separators=(",",":")).encode("utf-8")
+              submit=urllib.request.Request(base+"/v1/submit-counterpart-alignment",data=body,headers={"Authorization":"Bearer "+token,"Content-Type":"application/json"},method="POST")
+              with urllib.request.urlopen(submit,timeout=30) as r: submitted=json.load(r)
+              job_id=str(submitted.get("job_id") or "")
+              if not job_id: raise RuntimeError("worker did not return a job id")
+              job=None
+              for _ in range(900):
+                  poll=urllib.request.Request(base+"/v1/counterpart-alignment-jobs/"+job_id,headers={"Authorization":"Bearer "+token})
+                  with urllib.request.urlopen(poll,timeout=20) as r: job=json.load(r)
+                  if job.get("status") in ("completed","failed"): break
+                  time.sleep(2)
+              if not job or job.get("status")!="completed": raise RuntimeError("geometry alignment did not complete")
+              alignment=job.get("result")
+              if not isinstance(alignment,dict): raise RuntimeError("geometry alignment result is missing")
+              if alignment.get("algorithm_version")!="counterpart-alignment-v4-exact-mesh-gap-bounded": raise RuntimeError("geometry algorithm version mismatch")
+              triangles=int((alignment.get("source") or {}).get("triangle_count") or 0)
+              if triangles<=0: raise RuntimeError("full-resolution source mesh evidence is missing")
+              if alignment.get("status") not in ("ALIGNED","REVIEW_REQUIRED"): raise RuntimeError("geometry alignment status is invalid")
+              raw=json.dumps(alignment,separators=(",",":"),ensure_ascii=False).encode("utf-8")
+              if len(raw)>800000: raise RuntimeError("geometry evidence exceeds the result limit")
+              with open("/tmp/makersence-alignment-result.json","wb") as f: f.write(raw)
+              print(json.dumps({"geometry_status":alignment.get("status"),"source_triangle_count":triangles,"result_bytes":len(raw)}))
+          except Exception:
+              raise SystemExit("Full-resolution geometry alignment failed; raw worker details were withheld.")
           PY
-          else
-            echo "Full-resolution geometry alignment failed; raw worker details were withheld."
-            exit 1
-          fi
 
-      - name: Return result with the runner's OIDC identity
+      - name: Return the signed result to MakerSence Hub
         if: always() && steps.claim.outputs.claimed == 'true'
         env:
           TASK_ID: ${{ steps.claim.outputs.task_id }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          COMMIT_SHA: ${{ github.sha }}
           ALIGN_OUTCOME: ${{ steps.align.outcome }}
-        shell: bash
         run: |
           node <<'NODE'
           const fs = require('fs');
-          const gateway = 'https://lux3d-secure-relay.hatchable.site/api/makersence-runner';
-          const audience = gateway;
-          function stop() { console.error('Geometry result delivery failed; result data were withheld.'); process.exitCode = 1; }
-          async function oidcToken() {
+          const hub = 'https://makersence.hatchable.site';
+          const audience = hub + '/api/research/github-runner';
+          async function getOidcToken() {
             const endpoint = String(process.env.ACTIONS_ID_TOKEN_REQUEST_URL || '');
             const requestToken = String(process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN || '');
             if (!endpoint || !requestToken) throw new Error('OIDC_UNAVAILABLE');
@@ -199,42 +220,48 @@ jobs:
             return token;
           }
           async function main() {
-            const ok = process.env.ALIGN_OUTCOME === 'success';
-            let alignment = null;
-            if (ok) {
-              const resultPath = require('path').join(process.env.RUNNER_TEMP, 'makersence_geometry', process.env.TASK_ID, 'alignment.json');
-              alignment = JSON.parse(fs.readFileSync(resultPath, 'utf8'));
-            }
-            const body = {
-              action: 'complete',
+            const success = process.env.ALIGN_OUTCOME === 'success';
+            const payload = {
               task_id: String(process.env.TASK_ID || ''),
-              run_id: String(process.env.GITHUB_RUN_ID || ''),
-              run_attempt: Number(process.env.GITHUB_RUN_ATTEMPT || 0),
-              sha: String(process.env.GITHUB_SHA || ''),
-              status: ok ? 'completed' : 'failed'
+              run_id: String(process.env.RUN_ID || ''),
+              run_attempt: Number(process.env.RUN_ATTEMPT || 0),
+              sha: String(process.env.COMMIT_SHA || ''),
+              status: success ? 'completed' : 'failed'
             };
-            if (ok) body.alignment = alignment;
-            else body.failure_code = 'WORKER_FAILED';
-            const token = await oidcToken();
-            const response = await fetch(gateway, {
-              method: 'POST',
-              headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
-              body: JSON.stringify(body),
-              signal: AbortSignal.timeout(20000)
-            });
-            if (!response.ok) throw new Error('GATEWAY_HTTP_' + response.status);
-            const result = await response.json();
-            if (!result.ok) throw new Error('GATEWAY_REJECTED');
-            console.log('Geometry result accepted by the short-lived gateway.');
+            if (success) payload.alignment = JSON.parse(fs.readFileSync('/tmp/makersence-alignment-result.json', 'utf8'));
+            else payload.failure_code = 'WORKER_FAILED';
+            const body = JSON.stringify(payload);
+            for (let attempt = 0; attempt < 12; attempt++) {
+              const token = await getOidcToken();
+              let response;
+              try {
+                response = await fetch(hub + '/api/research/github-runner-result', {
+                  method: 'POST',
+                  headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+                  body,
+                  signal: AbortSignal.timeout(15000)
+                });
+              } catch {
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                continue;
+              }
+              if (response.status === 200) {
+                console.log('Signed geometry result was accepted by MakerSence Hub.');
+                return;
+              }
+              if (response.status === 202 || response.status === 409 || response.status >= 500) {
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                continue;
+              }
+              throw new Error('HUB_RESULT_REJECTED');
+            }
+            throw new Error('HUB_RESULT_DELIVERY_TIMEOUT');
           }
-          main().catch(stop);
+          main().catch(() => { console.error('Signed result delivery failed.'); process.exitCode = 1; });
           NODE
 
-      - name: Erase runner-local geometry data
-        if: always() && steps.claim.outputs.claimed == 'true'
-        env:
-          TASK_ID: ${{ steps.claim.outputs.task_id }}
-        shell: bash
+      - name: Remove temporary geometry data
+        if: always()
         run: |
-          rm -rf -- "${RUNNER_TEMP}/makersence_geometry/${TASK_ID}"
-          docker image rm makersence-heavy-geometry >/dev/null 2>&1 || true
+          docker rm -f makersence-heavy-geometry >/dev/null 2>&1 || true
+          rm -f /tmp/makersence-alignment-request.json /tmp/makersence-alignment-result.json
