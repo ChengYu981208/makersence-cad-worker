@@ -32,6 +32,31 @@ jobs:
       - name: Build the Heavy Worker container
         working-directory: makersence-cad-worker/runtime/heavy
         run: docker build --pull -t makersence-heavy-relay-test .
+      - name: Smoke test the built worker routes
+        working-directory: makersence-cad-worker/runtime/heavy
+        run: |
+          docker run -d --name makersence-heavy-relay-test -e WORKER_TOKEN=ci-token -p 18000:8000 makersence-heavy-relay-test
+          python - <<'PY'
+          import json,time,urllib.request,urllib.error
+          for _ in range(90):
+              try:
+                  with urllib.request.urlopen("http://127.0.0.1:18000/health",timeout=3) as response:
+                      if json.load(response).get("ok"): break
+              except Exception: time.sleep(1)
+          else: raise SystemExit("worker health check timed out")
+          request=urllib.request.Request("http://127.0.0.1:18000/v1/github-runner/claim",data=b"{}",headers={"Authorization":"Bearer malformed"},method="POST")
+          try:
+              urllib.request.urlopen(request,timeout=5)
+              raise SystemExit("unsigned OIDC request was accepted")
+          except urllib.error.HTTPError as error:
+              body=json.loads(error.read().decode("utf-8"))
+              if error.code!=401 or body.get("error") not in ("OIDC_TOKEN_INVALID","OIDC_TOKEN_REQUIRED"):
+                  raise SystemExit("runner claim fail-closed check failed")
+          print("Worker starts and rejects an unsigned runner claim.")
+          PY
+      - name: Stop smoke test worker
+        if: always()
+        run: docker rm -f makersence-heavy-relay-test >/dev/null 2>&1 || true
       - name: Test OIDC verification and task lifecycle
         working-directory: makersence-cad-worker/runtime/heavy
         run: python -m unittest -v test_github_runner_relay.py
