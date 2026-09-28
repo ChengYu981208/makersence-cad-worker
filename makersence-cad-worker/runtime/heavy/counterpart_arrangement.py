@@ -245,7 +245,8 @@ def solve_instance_arrangement(
     exhausted = False
     mesh_state: dict[str, Any] | None = None
     mesh_state_checked = False
-    source_triangle_count = len(source_mesh.get("triangles") or []) if isinstance(source_mesh, dict) else 0
+    source_triangles = source_mesh.get("triangles") if isinstance(source_mesh, dict) else None
+    source_triangle_count = len(source_triangles) if source_triangles is not None else 0
     transformed_cache_capacity = (
         max(2, min(8, 600_000 // max(1, source_triangle_count)))
         if source_mesh is not None else 0
