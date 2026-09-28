@@ -140,6 +140,9 @@ jobs:
           docker run -d --name makersence-heavy-geometry \
             -e WORKER_TOKEN=ephemeral-github-runner-token \
             -e PORT=8000 \
+            -e MAKERSENCE_HEAVY_MEMORY_PROFILE=github-actions-16gb \
+            -e MAKERSENCE_HEAVY_MEMORY_SOFT_LIMIT_MB=12288 \
+            -e MAKERSENCE_HEAVY_MEMORY_HARD_LIMIT_MB=14336 \
             -e MAKERSENCE_HEAVY_CONCURRENCY=1 \
             -p 18000:8000 \
             makersence-heavy-geometry
