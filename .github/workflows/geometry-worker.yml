@@ -92,7 +92,11 @@ jobs:
               }),
               signal: AbortSignal.timeout(20000)
             });
-            if (!String(response.headers.get('content-type') || '').toLowerCase().includes('application/json')) fail('WORKER_RESPONSE_NOT_JSON');
+            if (!String(response.headers.get('content-type') || '').toLowerCase().includes('application/json')) {
+              fs.appendFileSync(process.env.GITHUB_OUTPUT, ['claimed=false', ''].join(String.fromCharCode(10)));
+              console.log('Hub is not publicly reachable yet; no task was claimed.');
+              return;
+            }
             const result = await response.json();
             if ((response.status === 202 && result.status === 'not_ready') ||
                 (response.status === 503 && result.error === 'RUNNER_NOT_ENABLED')) {
