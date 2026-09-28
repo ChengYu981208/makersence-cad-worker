@@ -35,8 +35,8 @@ class RunnerRelayTests(unittest.TestCase):
         claims = {
             "iss": relay.ISSUER, "aud": relay.AUDIENCE,
             "repository": relay.REPOSITORY,
-            "ref": "refs/heads/codex/github-runner-relay-20260928",
-            "workflow_ref": relay.TRUSTED_WORKFLOWS["refs/heads/codex/github-runner-relay-20260928"],
+            "ref": "refs/heads/main",
+            "workflow_ref": relay.TRUSTED_WORKFLOWS["refs/heads/main"],
             "run_id": "12345678", "run_attempt": "1", "sha": "a" * 40,
             "iat": now, "nbf": now - 1, "exp": now + 300,
         }
@@ -90,6 +90,29 @@ class RunnerRelayTests(unittest.TestCase):
             with self.assertRaises(relay.RelayError) as caught:
                 relay.claim_task(self.headers(), {"run_id": "different", "run_attempt": 1, "sha": "a" * 40})
             self.assertEqual(caught.exception.status, 401)
+
+    def test_expired_runner_lease_can_be_claimed_by_another_run(self):
+        task_id = "3" * 32
+        relay.enqueue_task(task_id, self.request())
+        first_body = {"run_id": "12345678", "run_attempt": 1, "sha": "a" * 40}
+        first_token = self.token()
+        with patch.object(relay, "_get_jwks", return_value=[self.jwk]):
+            first = relay.claim_task(self.headers(first_token), first_body)
+            self.assertEqual(first["task"]["task_id"], task_id)
+            with relay._lock:
+                relay._tasks[task_id]["updated_at"] = time.time() - relay.CLAIM_LEASE_SECONDS - 1
+            self.assertEqual(relay.get_task(task_id)["status"], "queued")
+            second_body = {"run_id": "87654321", "run_attempt": 1, "sha": "b" * 40}
+            second_token = self.token(run_id="87654321", sha="b" * 40)
+            second = relay.claim_task(self.headers(second_token), second_body)
+            self.assertEqual(second["task"]["task_id"], task_id)
+            stale_result = {
+                **first_body, "task_id": task_id, "status": "failed",
+                "failure_code": "WORKER_FAILED",
+            }
+            with self.assertRaises(relay.RelayError) as caught:
+                relay.complete_task(self.headers(first_token), stale_result)
+            self.assertEqual(caught.exception.status, 409)
 
 
 if __name__ == "__main__":
