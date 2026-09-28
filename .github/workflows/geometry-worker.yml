@@ -52,18 +52,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Claim one geometry task from the durable MakerSence Hub queue
+      - name: Claim one geometry task from the public Heavy Worker relay
         id: claim
         env:
-          RUN_ID: ${{ github.run_id }}
-          RUN_ATTEMPT: ${{ github.run_attempt }}
-          COMMIT_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }
+          RUN_ATTEMPT: ${{ github.run_attempt }
+          COMMIT_SHA: ${{ github.sha }
         shell: bash
         run: |
           node <<'NODE'
           const fs = require('fs');
-          const hub = 'https://makersence.hatchable.site';
-          const audience = hub + '/api/research/github-runner';
+          const worker = 'https://cad-worker-v2-production.up.railway.app';
+          const audience = worker + '/v1/github-runner';
           function fail(code) { throw new Error(code); }
           async function getOidcToken() {
             const endpoint = String(process.env.ACTIONS_ID_TOKEN_REQUEST_URL || '');
@@ -82,7 +82,7 @@ jobs:
           }
           async function main() {
             const token = await getOidcToken();
-            const response = await fetch(hub + '/api/research/github-runner-claim', {
+            const response = await fetch(worker + '/v1/github-runner/claim', {
               method: 'POST',
               headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
               body: JSON.stringify({
@@ -92,17 +92,16 @@ jobs:
               }),
               signal: AbortSignal.timeout(20000)
             });
-            const contentType = String(response.headers.get('content-type') || '').toLowerCase();
-            if (!contentType.includes('application/json')) fail('HUB_RESPONSE_NOT_JSON');
+            if (!String(response.headers.get('content-type') || '').toLowerCase().includes('application/json')) fail('WORKER_RESPONSE_NOT_JSON');
             const result = await response.json();
-            if (response.status === 202 && result.status === 'not_ready') {
+            if (!response.ok || !result.ok) fail('WORKER_CLAIM_REJECTED');
+            if (!result.task) {
               fs.appendFileSync(process.env.GITHUB_OUTPUT, ['claimed=false', ''].join(String.fromCharCode(10)));
               console.log('No geometry task is waiting.');
               return;
             }
-            if (!response.ok || !result.ok) fail('HUB_CLAIM_REJECTED');
-            const taskId = String(result.task_id || '');
-            const request = result.request || {};
+            const taskId = String(result.task.task_id || '');
+            const request = result.task.request || {};
             if (!/^[a-f0-9]{32}$/.test(taskId)) fail('TASK_ID_INVALID');
             for (const key of ['source_url', 'counterpart_url']) {
               const value = String(request[key] || '');
@@ -113,9 +112,8 @@ jobs:
             fs.appendFileSync(process.env.GITHUB_OUTPUT, ['claimed=true', 'task_id=' + taskId, ''].join(String.fromCharCode(10)));
             console.log('A signed geometry task was claimed; request details were withheld.');
           }
-          main().catch(() => { console.error('Hub task claim failed; request details were withheld.'); process.exitCode = 1; });
+          main().catch(() => { console.error('Geometry task claim failed; request details were withheld.'); process.exitCode = 1; });
           NODE
-
       - name: Check out the pinned Heavy Worker source
         if: steps.claim.outputs.claimed == 'true'
         uses: actions/checkout@v4
@@ -191,19 +189,19 @@ jobs:
               raise SystemExit("Full-resolution geometry alignment failed; raw worker details were withheld.")
           PY
 
-      - name: Return the signed result to MakerSence Hub
+      - name: Return the signed result to the Heavy Worker relay
         if: always() && steps.claim.outputs.claimed == 'true'
         env:
-          TASK_ID: ${{ steps.claim.outputs.task_id }}
-          RUN_ID: ${{ github.run_id }}
-          RUN_ATTEMPT: ${{ github.run_attempt }}
-          COMMIT_SHA: ${{ github.sha }}
-          ALIGN_OUTCOME: ${{ steps.align.outcome }}
+          TASK_ID: ${{ steps.claim.outputs.task_id }
+          RUN_ID: ${{ github.run_id }
+          RUN_ATTEMPT: ${{ github.run_attempt }
+          COMMIT_SHA: ${{ github.sha }
+          ALIGN_OUTCOME: ${{ steps.align.outcome }
         run: |
           node <<'NODE'
           const fs = require('fs');
-          const hub = 'https://makersence.hatchable.site';
-          const audience = hub + '/api/research/github-runner';
+          const worker = 'https://cad-worker-v2-production.up.railway.app';
+          const audience = worker + '/v1/github-runner';
           async function getOidcToken() {
             const endpoint = String(process.env.ACTIONS_ID_TOKEN_REQUEST_URL || '');
             const requestToken = String(process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN || '');
@@ -235,7 +233,7 @@ jobs:
               const token = await getOidcToken();
               let response;
               try {
-                response = await fetch(hub + '/api/research/github-runner-result', {
+                response = await fetch(worker + '/v1/github-runner/result', {
                   method: 'POST',
                   headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
                   body,
@@ -245,21 +243,22 @@ jobs:
                 await new Promise(resolve => setTimeout(resolve, 2000));
                 continue;
               }
-              if (response.status === 200) {
-                console.log('Signed geometry result was accepted by MakerSence Hub.');
+              let result = {};
+              try { result = await response.json(); } catch {}
+              if (response.status === 200 && result.ok) {
+                console.log('Signed geometry result was accepted by the Heavy Worker relay.');
                 return;
               }
               if (response.status === 202 || response.status === 409 || response.status >= 500) {
                 await new Promise(resolve => setTimeout(resolve, 2000));
                 continue;
               }
-              throw new Error('HUB_RESULT_REJECTED');
+              throw new Error('WORKER_RESULT_REJECTED');
             }
-            throw new Error('HUB_RESULT_DELIVERY_TIMEOUT');
+            throw new Error('WORKER_RESULT_DELIVERY_TIMEOUT');
           }
           main().catch(() => { console.error('Signed result delivery failed.'); process.exitCode = 1; });
           NODE
-
       - name: Remove temporary geometry data
         if: always()
         run: |
