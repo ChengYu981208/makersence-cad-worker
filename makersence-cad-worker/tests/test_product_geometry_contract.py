@@ -85,7 +85,7 @@ def ready_device_envelope_contract():
         "export_policy": "EXCLUDE_FROM_PRINTABLE_OUTPUT",
         "part_ids": ["DEVICE_REFERENCE"],
         "alignment": {
-            "status": "ALIGNED", "confidence": "HIGH", "algorithm_version": "counterpart-alignment-v2-assembly-graph", "pose_unique": True, "solution_count": 1,
+            "status": "ALIGNED", "confidence": "HIGH", "algorithm_version": "counterpart-alignment-v3-exact-mesh-gap", "pose_unique": True, "solution_count": 1,
             "expected_instances": 1, "matched_instances": 1,
             "selected_transform_4x4": [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]],
             "candidate_poses": [],
