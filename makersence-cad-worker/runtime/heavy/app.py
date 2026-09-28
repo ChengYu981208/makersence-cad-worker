@@ -5,19 +5,27 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from urllib.request import Request, urlopen
 
+# Alignment only needs the mesh parser and bounded Manifold checks. It runs in
+# a subprocess beside the long-lived CAD service, so avoid loading OpenCascade,
+# Pillow, SVG, and Shapely into a second process under the 1 GB container cap.
+COUNTERPART_ALIGNMENT_CHILD_MODE = len(sys.argv) >= 4 and sys.argv[1] == "--counterpart-alignment-child"
+if COUNTERPART_ALIGNMENT_CHILD_MODE:
+    print("COUNTERPART_ALIGNMENT_STAGE:bootstrap:lightweight_imports", flush=True)
+
 from design_model_router import design_model_provider_status, route_design_model
 from product_geometry_contract import is_interface_preserving_scope, protected_rebuild_blockers
 from counterpart_arrangement import solve_instance_arrangement
 from counterpart_mesh import load_3mf_assembly_mesh
 
-import cadquery as cq
-from cadquery import exporters
-from PIL import Image, ImageDraw, ImageFilter
-from svgpathtools import parse_path
-from shapely.geometry import Polygon, MultiPolygon, GeometryCollection, Point, LineString, box as shapely_box
-from shapely.ops import unary_union
-from shapely.affinity import translate as geom_translate
-from shapely.validation import explain_validity
+if not COUNTERPART_ALIGNMENT_CHILD_MODE:
+    import cadquery as cq
+    from cadquery import exporters
+    from PIL import Image, ImageDraw, ImageFilter
+    from svgpathtools import parse_path
+    from shapely.geometry import Polygon, MultiPolygon, GeometryCollection, Point, LineString, box as shapely_box
+    from shapely.ops import unary_union
+    from shapely.affinity import translate as geom_translate
+    from shapely.validation import explain_validity
 
 TOKEN=os.environ.get("WORKER_TOKEN","")
 PORT=int(os.environ.get("PORT","8000"))
@@ -48,6 +56,9 @@ def current_rss_mb():
         m=re.search(r"^VmRSS:\s+(\d+)\s+kB",txt,re.M)
         return round(int(m.group(1))/1024.0,1) if m else 0.0
     except Exception:return 0.0
+
+def _counterpart_alignment_stage(name):
+    print("COUNTERPART_ALIGNMENT_STAGE:"+str(name)+":rss_mb="+str(current_rss_mb()),flush=True)
 
 def resource_policy(req):
     c=req.get("cad_contract") or {}
@@ -3538,7 +3549,9 @@ def _counterpart_alignment_job_runner(jid,req):
 
 def _counterpart_alignment_child_cli(jid,folder):
     folder=pathlib.Path(folder);request_path=folder/"alignment_request.json";result_path=folder/"alignment_result.json"
+    _counterpart_alignment_stage("child_imports_complete")
     req=json.loads(request_path.read_text(encoding="utf-8"))
+    _counterpart_alignment_stage("request_loaded")
     result=align_counterpart_urls(req.get("source_url"),req.get("counterpart_url"),req.get("relation") or "support",req.get("expected_instances",1),req.get("counterpart_context"),req.get("source_part_ids"))
     out={"status":"completed","result":result,"completed_at":time.time()}
     tmp=result_path.with_suffix(".tmp");tmp.write_text(json.dumps(out,ensure_ascii=False),encoding="utf-8");tmp.replace(result_path)
@@ -4395,11 +4408,15 @@ def _ca_instance_alignment_evidence(expected_instances,confidence,transform):
             "instance_solution_method":"SINGLE_INSTANCE_POSE_ONLY","instance_solution_complete":matched==expected}
 
 def align_counterpart_urls(source_url,counterpart_url,relation="support",expected_instances=1,counterpart_context=None,source_part_ids=None):
+    _counterpart_alignment_stage("alignment_started")
     try:expected_instances=max(1,min(12,int(expected_instances or 1)))
     except Exception:raise ValueError("counterpart expected_instances must be an integer from 1 to 12")
     sp,sbytes=_ca_download_3mf(source_url,"source");cp,cbytes=_ca_download_3mf(counterpart_url,"counterpart")
+    _counterpart_alignment_stage("3mf_downloaded")
     src=load_3mf_assembly_mesh(sp,part_object_ids=source_part_ids);ctr=_ca_largest_mesh_3mf(cp)
+    _counterpart_alignment_stage("meshes_loaded")
     src_surface=_ca_surface_samples(src,12000);h=_ca_hash(src_surface,5.0);ctr_pts=_ca_point_samples(ctr,900)
+    _counterpart_alignment_stage("sampling_complete")
     rotations=_ca_rotations()
     ranked=sorted([(round(_ca_orientation_affinity(src["bbox"]["dimensions"],_ca_rot_bbox(ctr["bbox"],m)),6),m) for m in rotations],key=lambda x:x[0])[:10]
     coarse=[]
@@ -4435,6 +4452,7 @@ def align_counterpart_urls(source_url,counterpart_url,relation="support",expecte
          t=[t0[0]+dx,t0[1]+dy,t0[2]+dz];met=_ca_pose_score(ctr_pts,m,t,h,src["bbox"])
          refined.append((met["score"]-aff*6.0,m,t,met,aff))
     refined.sort(key=lambda x:x[0],reverse=True)
+    _counterpart_alignment_stage("coarse_and_refined_search_complete")
     exact_records=_ca_triangle_records(src);exact_hash=_ca_triangle_hash(exact_records,6.0)
     exact_rows=[]
     for row in refined[:(150 if expected_instances>1 else 60)]:
@@ -4471,6 +4489,7 @@ def align_counterpart_urls(source_url,counterpart_url,relation="support",expecte
                 "pose_bbox_mm":mm.get("pose_bbox_mm"),
                 "pose_metrics":mm,
             })
+        _counterpart_alignment_stage("exact_pose_scoring_complete")
         instance_alignment=solve_instance_arrangement(
             alignment_candidates,expected_instances,
             source_dimensions_mm=src["bbox"]["dimensions"],
@@ -4582,7 +4601,7 @@ def _u_cad_evidence_binding_selftest():
     return {"status":"PASS" if all(checks.values()) else "FAIL","checks":checks,"bindings":binding_rows,"removed_volume_mm3":round(removed,3),"expected_removed_volume_mm3":round(expected,3)}
 
 class Handler(BaseHTTPRequestHandler):
-    server_version="MakerSenceCAD/2.64.8-exact-mesh-alignment-v4-bounded-cache"
+    server_version="MakerSenceCAD/2.64.9-lightweight-alignment-child-v4"
     def log_message(self,fmt,*args):print(fmt%args,flush=True)
     def send_json(self,code,obj):
         data=json.dumps(obj,ensure_ascii=False).encode("utf-8")
@@ -4598,7 +4617,7 @@ class Handler(BaseHTTPRequestHandler):
         return True
     def do_GET(self):
         path=urlparse(self.path).path
-        if path=="/health":return self.send_json(200,{"ok":True,"service":"makersence-cad-worker","version":"2.64.8-exact-mesh-alignment-v4-bounded-cache","engine":"cadquery+blender+svgpathtools+shapely+pillow","blender":{"available":pathlib.Path(BLENDER_BIN).exists(),"binary":BLENDER_BIN},"bambu_slicer":{"available":bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),"engine":"Bambu Studio","version":BAMBU_VERSION},"design_model_provider":design_model_provider_status(),"capabilities":["compact_step_brep","bambu_native_parts","detachable_parts","assembly_render","product_dimensions","open_edges_zero_gate","formal_mesh_render","artifact_reaudit","rectangular_blind_pockets","geometry_intent_gate","orphan_geometry_gate","unintended_through_cut_gate","welded_3mf_meshes","exported_3mf_topology_gate","true_font_outline_text","high_smooth_vector_mesh","multilingual_font_fallback","actual_text_stroke_gate","adaptive_cjk_regular_first","cjk_internal_clearance_gate","cjk_counter_preservation_gate","text_mesh_topology_candidate_gate","remote_3mf_stream_analyzer","remote_3mf_xml_iterparse","remote_3mf_transform_aware_bounds","remote_3mf_cad_drawing_v1","remote_3mf_reconstruction_sections_v2","auto_hole_slot_detection","blind_cavity_detection_v1","planar_face_cluster_locator_v1","cavity_bottom_face_match_v1","residual_wall_normal_distance_v1","paired_plane_thickness_v1","bounded_per_part_feature_scan_v1","auto_fillet_chamfer_candidates","auto_section_view_plan","multipart_dimension_semantics","supplementary_stl_step_analyzer","remote_source_url_analyzer_v1","counterpart_alignment_v1","transform_aware_3mf_build_graph_alignment_v1","counterpart_reference_mesh_evidence_v1","counterpart_multi_instance_arrangement_v1","counterpart_alignment_async_jobs_v1","counterpart_exact_surface_distance_v1","counterpart_exact_mesh_gap_v1","generic_memory_budget_v1","streaming_3mf_glb_export","source_3mf_glb_preview_v1","world_space_feature_center_v1","auto_text_boldening","typography_layout_bounds","script_aware_glyph_spacing","glyph_clearance_gate","text_readability_gate","bambu_04_text_profile","text_slicer_no_merge_gate","separate_structural_text_min_feature","arachne_text_project_settings","bambu_cli_real_slice","gcode_3mf_toolpath_gate","print_ready_plate_3mf","plate_part_coverage_gate","universal_cad_recipe_v2","cad_evidence_parametric_binding_v1","blind_cavity_recipe_cut_v1","planar_design_fidelity_artifact_gate_v1","universal_design_fidelity_artifact_gate_v1","section_loft_reconstruction_v1","section_loft_open_cavity_v2","multipart_relation_rebuild_v1","per_part_reconstruction_evidence_v1","planar_multiloop_extrusion_v1","planar_mesh_projection_fallback_v1","bambu_assembly_metadata_evidence_v1","assembly_pose_solver_v1","assembly_pose_solver_v3","mechanism_pose_brep_probe_v1","mechanism_motion_solver_v1","mechanism_motion_solver_v2","mechanism_motion_solver_v3","hinge_sweep_collision_gate_v1","terminal_stop_refinement_v1","latch_relative_pivot_engagement_v1","motion_bbox_prefilter_v1","motion_memory_checkpoint_v1","motion_exact_separation_prefilter_v1","motion_fail_closed_collision_v1","motion_early_direction_exit_v1","motion_isolated_subprocess_v1","motion_timeout_guard_v1","async_motion_jobs_v1","separate_part_mate_resolver_v1","planar_ring_opening_match_v1","faceted_mesh_brep_v1","complex_topology_mesh_fallback_v1","sealed_internal_cavity_mesh_fallback_v1","multipart_dimension_semantics_v2","source_intended_contact_qa_v1","same_root_assembly_guard_v1","axisymmetric_revolve_reconstruction_v1","bounded_inprocess_universal_jobs_v1","planar_prismatic_reconstruction_v1","commercial_visual_release_gate_v1","fail_closed_family_router_v1","svg_profile_extrusion_v1","formal_geometry_only_render_v1","text_08mm_baseline_v1","generic_blender_profile_executor_v1","generic_blender_to_cad_brep_v1","design_model_provider_router_v1","modal_triposg_provider_v1",],"profiles":["bambu_a1_mini_04"],"universal_executor_probe":{"cavity_loft_policy":UNIVERSAL_CAVITY_LOFT_POLICY,"loft_argcount":_u_loft_from_loops.__code__.co_argcount}})
+        if path=="/health":return self.send_json(200,{"ok":True,"service":"makersence-cad-worker","version":"2.64.9-lightweight-alignment-child-v4","engine":"cadquery+blender+svgpathtools+shapely+pillow","blender":{"available":pathlib.Path(BLENDER_BIN).exists(),"binary":BLENDER_BIN},"bambu_slicer":{"available":bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),"engine":"Bambu Studio","version":BAMBU_VERSION},"design_model_provider":design_model_provider_status(),"capabilities":["compact_step_brep","bambu_native_parts","detachable_parts","assembly_render","product_dimensions","open_edges_zero_gate","formal_mesh_render","artifact_reaudit","rectangular_blind_pockets","geometry_intent_gate","orphan_geometry_gate","unintended_through_cut_gate","welded_3mf_meshes","exported_3mf_topology_gate","true_font_outline_text","high_smooth_vector_mesh","multilingual_font_fallback","actual_text_stroke_gate","adaptive_cjk_regular_first","cjk_internal_clearance_gate","cjk_counter_preservation_gate","text_mesh_topology_candidate_gate","remote_3mf_stream_analyzer","remote_3mf_xml_iterparse","remote_3mf_transform_aware_bounds","remote_3mf_cad_drawing_v1","remote_3mf_reconstruction_sections_v2","auto_hole_slot_detection","blind_cavity_detection_v1","planar_face_cluster_locator_v1","cavity_bottom_face_match_v1","residual_wall_normal_distance_v1","paired_plane_thickness_v1","bounded_per_part_feature_scan_v1","auto_fillet_chamfer_candidates","auto_section_view_plan","multipart_dimension_semantics","supplementary_stl_step_analyzer","remote_source_url_analyzer_v1","counterpart_alignment_v1","transform_aware_3mf_build_graph_alignment_v1","counterpart_reference_mesh_evidence_v1","counterpart_multi_instance_arrangement_v1","counterpart_alignment_async_jobs_v1","counterpart_exact_surface_distance_v1","counterpart_exact_mesh_gap_v1","generic_memory_budget_v1","streaming_3mf_glb_export","source_3mf_glb_preview_v1","world_space_feature_center_v1","auto_text_boldening","typography_layout_bounds","script_aware_glyph_spacing","glyph_clearance_gate","text_readability_gate","bambu_04_text_profile","text_slicer_no_merge_gate","separate_structural_text_min_feature","arachne_text_project_settings","bambu_cli_real_slice","gcode_3mf_toolpath_gate","print_ready_plate_3mf","plate_part_coverage_gate","universal_cad_recipe_v2","cad_evidence_parametric_binding_v1","blind_cavity_recipe_cut_v1","planar_design_fidelity_artifact_gate_v1","universal_design_fidelity_artifact_gate_v1","section_loft_reconstruction_v1","section_loft_open_cavity_v2","multipart_relation_rebuild_v1","per_part_reconstruction_evidence_v1","planar_multiloop_extrusion_v1","planar_mesh_projection_fallback_v1","bambu_assembly_metadata_evidence_v1","assembly_pose_solver_v1","assembly_pose_solver_v3","mechanism_pose_brep_probe_v1","mechanism_motion_solver_v1","mechanism_motion_solver_v2","mechanism_motion_solver_v3","hinge_sweep_collision_gate_v1","terminal_stop_refinement_v1","latch_relative_pivot_engagement_v1","motion_bbox_prefilter_v1","motion_memory_checkpoint_v1","motion_exact_separation_prefilter_v1","motion_fail_closed_collision_v1","motion_early_direction_exit_v1","motion_isolated_subprocess_v1","motion_timeout_guard_v1","async_motion_jobs_v1","separate_part_mate_resolver_v1","planar_ring_opening_match_v1","faceted_mesh_brep_v1","complex_topology_mesh_fallback_v1","sealed_internal_cavity_mesh_fallback_v1","multipart_dimension_semantics_v2","source_intended_contact_qa_v1","same_root_assembly_guard_v1","axisymmetric_revolve_reconstruction_v1","bounded_inprocess_universal_jobs_v1","planar_prismatic_reconstruction_v1","commercial_visual_release_gate_v1","fail_closed_family_router_v1","svg_profile_extrusion_v1","formal_geometry_only_render_v1","text_08mm_baseline_v1","generic_blender_profile_executor_v1","generic_blender_to_cad_brep_v1","design_model_provider_router_v1","modal_triposg_provider_v1",],"profiles":["bambu_a1_mini_04"],"universal_executor_probe":{"cavity_loft_policy":UNIVERSAL_CAVITY_LOFT_POLICY,"loft_argcount":_u_loft_from_loops.__code__.co_argcount}})
         if path=="/v1/selftest/face-evidence":
             if not self.authorized():return
             return self.send_json(200,_dw_face_evidence_selftest())
@@ -4810,7 +4829,7 @@ if __name__=="__main__":
         raise SystemExit(_counterpart_alignment_child_cli(sys.argv[2],sys.argv[3]))
     if len(sys.argv)>=4 and sys.argv[1]=="--motion-child":
         raise SystemExit(_motion_child_cli(sys.argv[2],sys.argv[3]))
-    print("MakerSence CAD Worker 2.64.8-exact-mesh-alignment-v4-bounded-cache starting on",PORT,"Bambu Studio",BAMBU_VERSION,"available",bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),flush=True)
+    print("MakerSence CAD Worker 2.64.9-lightweight-alignment-child-v4 starting on",PORT,"Bambu Studio",BAMBU_VERSION,"available",bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),flush=True)
     if str(os.environ.get("MAKERSENCE_HYBRID_SMOKE_ON_START","")).strip()=="1":
         threading.Thread(target=_startup_hybrid_smoke,daemon=True,name="makersence-hybrid-smoke").start()
     ThreadingHTTPServer(("0.0.0.0",PORT),Handler).serve_forever()
