@@ -124,12 +124,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          task_dir="\${RUNNER_TEMP}/makersence_geometry/\${TASK_ID}"
-          mkdir -p "\${task_dir}"
-          if docker run --rm --volume "\${task_dir}:/task" makersence-heavy-geometry \
-            python /app/app.py --counterpart-alignment-child "\${TASK_ID}" /task \
-            >"\${task_dir}/worker.log" 2>&1; then
-            python - "\${task_dir}/alignment_result.json" "\${task_dir}/alignment.json" <<'PY'
+          task_dir="${RUNNER_TEMP}/makersence_geometry/${TASK_ID}"
+          mkdir -p "${task_dir}"
+          if docker run --rm --volume "${task_dir}:/task" makersence-heavy-geometry \
+            python /app/app.py --counterpart-alignment-child "${TASK_ID}" /task \
+            >"${task_dir}/worker.log" 2>&1; then
+            python - "${task_dir}/alignment_result.json" "${task_dir}/alignment.json" <<'PY'
           import json,sys
           source,dest=sys.argv[1],sys.argv[2]
           with open(source,encoding="utf-8") as f: wrapper=json.load(f)
@@ -218,5 +218,5 @@ jobs:
           TASK_ID: ${{ steps.claim.outputs.task_id }}
         shell: bash
         run: |
-          rm -rf -- "\${RUNNER_TEMP}/makersence_geometry/\${TASK_ID}"
+          rm -rf -- "${RUNNER_TEMP}/makersence_geometry/${TASK_ID}"
           docker image rm makersence-heavy-geometry >/dev/null 2>&1 || true
