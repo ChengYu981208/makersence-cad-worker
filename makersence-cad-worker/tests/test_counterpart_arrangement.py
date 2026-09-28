@@ -1,8 +1,10 @@
 import unittest
 import sys
+from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "runtime" / "heavy"))
+import counterpart_arrangement
 from counterpart_arrangement import solve_instance_arrangement
 
 
@@ -137,6 +139,41 @@ class InstanceArrangementTests(unittest.TestCase):
         result = self.solve(rows)
         self.assertEqual(result["status"], "ALIGNED")
         self.assertEqual(result["supported_pose_count"], 2)
+
+    def test_exact_mesh_pose_cache_is_bounded_for_large_candidate_pool(self):
+        candidates = []
+        for index, x in enumerate(range(0, 80, 8)):
+            row = mesh_candidate([x, 0, 0], 100 - index)
+            row["pose_bbox_mm"]["max"] = [x + 100, 10, 10]
+            candidates.append(row)
+
+        fake_state = {"base": object()}
+        exact_proof = {
+            "method": "MANIFOLD3D_EXACT_MESH_GAP",
+            "clearance_lower_bound_mm": 0.25,
+            "overlap_volume_mm3": 0.0,
+            "required_gap_mm": 0.25,
+            "status": "PASS",
+        }
+        with (
+            patch.object(counterpart_arrangement, "_manifold_source", return_value=fake_state),
+            patch.object(counterpart_arrangement, "_pose_manifold", side_effect=lambda _state, _pose: object()) as pose_builder,
+            patch.object(counterpart_arrangement, "_exact_mesh_clearance", return_value=exact_proof),
+        ):
+            result = solve_instance_arrangement(
+                candidates,
+                2,
+                source_dimensions_mm=[100, 20, 20],
+                minimum_contact_count=14,
+                minimum_gap_mm=0.25,
+                source_mesh=tetra_mesh(),
+                max_candidates=20,
+                max_exact_pair_checks=100,
+            )
+
+        self.assertEqual(result["transformed_pose_cache_capacity"], 8)
+        self.assertEqual(result["transformed_pose_cache_peak"], 8)
+        self.assertGreater(pose_builder.call_count, result["transformed_pose_cache_capacity"])
 
     def test_invalid_rigid_transform_is_rejected(self):
         scale = [[2, 0, 0], [0, 1, 0], [0, 0, 1]]
