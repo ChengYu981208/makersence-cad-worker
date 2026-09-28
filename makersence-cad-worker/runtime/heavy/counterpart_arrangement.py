@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections import OrderedDict
-from typing import Any
+from typing import Any, Callable
 
 
 def _number(value: Any) -> float | None:
@@ -85,10 +85,17 @@ def _manifold_source(mesh: Any) -> dict[str, Any] | None:
         return None
     vertices = mesh.get("vertices")
     triangles = mesh.get("triangles")
-    if not isinstance(vertices, list) or not isinstance(triangles, list) or len(triangles) < 4:
+    if vertices is None or triangles is None:
+        return None
+    try:
+        vertex_count = len(vertices)
+        triangle_count = len(triangles)
+    except TypeError:
+        return None
+    if triangle_count < 4:
         return None
     # Bound CPU and memory before constructing the exact collision kernel.
-    if len(vertices) > 1_000_000 or len(triangles) > 1_000_000:
+    if vertex_count > 1_000_000 or triangle_count > 1_000_000:
         return None
     try:
         import numpy as np
@@ -165,6 +172,7 @@ def solve_instance_arrangement(
     uniqueness_relative_gap: float = 0.035,
     source_mesh: dict[str, Any] | None = None,
     max_exact_pair_checks: int = 500,
+    stage_callback: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Select supported poses with bounded, auditable pairwise clearance proofs.
 
@@ -246,14 +254,23 @@ def solve_instance_arrangement(
     transformed: OrderedDict[int, Any] = OrderedDict()
     pair_cache: dict[tuple[int, int], dict[str, Any] | None] = {}
 
+    def report_stage(name: str) -> None:
+        if callable(stage_callback):
+            try:
+                stage_callback(name)
+            except Exception:
+                pass
+
     def transformed_pose(index: int):
         nonlocal mesh_state, mesh_state_checked, transformed_cache_peak
         if index in transformed:
             transformed.move_to_end(index)
             return transformed[index]
         if not mesh_state_checked:
+            report_stage("manifold_source_start")
             mesh_state = _manifold_source(source_mesh)
             mesh_state_checked = True
+            report_stage("manifold_source_ready" if mesh_state is not None else "manifold_source_unavailable")
         result = None if mesh_state is None else _pose_manifold(mesh_state, unique[index])
         transformed[index] = result
         transformed.move_to_end(index)
@@ -288,8 +305,13 @@ def solve_instance_arrangement(
         if left_mesh is None or right_mesh is None:
             pair_cache[key] = None
             return None
+        first_exact_check = exact_pair_checks == 0
+        if first_exact_check:
+            report_stage("exact_pair_clearance_start")
         exact_pair_checks += 1
         proof = _exact_mesh_clearance(left_mesh, right_mesh, mesh_state, gap)
+        if first_exact_check:
+            report_stage("exact_pair_clearance_complete" if proof is not None else "exact_pair_clearance_failed")
         if proof is not None:
             pair_cache[key] = proof
         else:
