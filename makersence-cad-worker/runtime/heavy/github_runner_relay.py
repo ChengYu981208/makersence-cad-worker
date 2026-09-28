@@ -23,11 +23,11 @@ REPOSITORY = "ChengYu981208/makersence-cad-worker"
 WORKFLOW_PATH = REPOSITORY + "/.github/workflows/geometry-worker.yml@"
 TRUSTED_WORKFLOWS = {
     "refs/heads/main": WORKFLOW_PATH + "refs/heads/main",
-    "refs/heads/codex/github-runner-relay-20260928": WORKFLOW_PATH + "refs/heads/codex/github-runner-relay-20260928",
 }
 MAX_TASKS = 32
 MAX_RESULT_BYTES = 800_000
 TASK_TTL_SECONDS = 3 * 60 * 60
+CLAIM_LEASE_SECONDS = 55 * 60
 _tasks: dict[str, dict] = {}
 _lock = threading.RLock()
 _jwks: list[dict] = []
@@ -117,10 +117,13 @@ def verify_github_oidc(authorization: str) -> dict:
 
 
 def _cleanup(now: float) -> None:
-    expired = [task_id for task_id, task in _tasks.items()
-               if now - float(task.get("updated_at", now)) > TASK_TTL_SECONDS]
-    for task_id in expired:
-        _tasks.pop(task_id, None)
+    for task_id, task in list(_tasks.items()):
+        if task.get("status") == "claimed" and now - float(task.get("updated_at", now)) > CLAIM_LEASE_SECONDS:
+            task.update(status="queued", updated_at=now)
+            for key in ("run_id", "run_attempt", "sha"):
+                task.pop(key, None)
+        if now - float(task.get("updated_at", now)) > TASK_TTL_SECONDS:
+            _tasks.pop(task_id, None)
 
 
 def _valid_request(request: object) -> dict:
