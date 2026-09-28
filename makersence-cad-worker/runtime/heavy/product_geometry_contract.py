@@ -240,7 +240,7 @@ def interface_preserving_contract_issues(contract: Any) -> list[str]:
         if protected_node is None or str(_dict(protected_node).get("mode") or "").upper() != "DEVICE_ENVELOPE":
             issues.append("DEVICE_ENVELOPE_PROTECTED_INTERFACE_LINK_MISSING")
         alignment = _dict(reference.get("alignment"))
-        if alignment.get("algorithm_version") != "counterpart-alignment-v3-exact-mesh-gap":
+        if alignment.get("algorithm_version") != "counterpart-alignment-v4-exact-mesh-gap-bounded":
             issues.append("DEVICE_ENVELOPE_ALIGNMENT_ALGORITHM_VERSION_UNSUPPORTED")
         expected_raw = _number(alignment.get("expected_instances"))
         matched_raw = _number(alignment.get("matched_instances"))
