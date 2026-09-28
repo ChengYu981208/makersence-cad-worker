@@ -209,6 +209,12 @@ class ProductGeometryContractTests(unittest.TestCase):
         blockers = interface_preserving_contract_issues(contract)
         self.assertIn("DEVICE_ENVELOPE_ALIGNMENT_ALGORITHM_VERSION_UNSUPPORTED", blockers)
 
+    def test_device_envelope_rejects_stale_aabb_alignment_version(self):
+        contract = ready_device_envelope_contract()
+        contract["product_geometry_contract"]["interface_reference"]["alignment"]["algorithm_version"] = "counterpart-alignment-v2-assembly-graph"
+        blockers = interface_preserving_contract_issues(contract)
+        self.assertIn("DEVICE_ENVELOPE_ALIGNMENT_ALGORITHM_VERSION_UNSUPPORTED", blockers)
+
     def test_device_envelope_multi_instance_requires_complete_interface_selections(self):
         contract = ready_multi_device_envelope_contract()
         self.assertEqual(interface_preserving_contract_issues(contract), [])
