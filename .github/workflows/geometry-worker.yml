@@ -55,9 +55,9 @@ jobs:
       - name: Claim one geometry task from the public Heavy Worker relay
         id: claim
         env:
-          RUN_ID: ${{ github.run_id }
-          RUN_ATTEMPT: ${{ github.run_attempt }
-          COMMIT_SHA: ${{ github.sha }
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          COMMIT_SHA: ${{ github.sha }}
         shell: bash
         run: |
           node <<'NODE'
@@ -194,11 +194,11 @@ jobs:
       - name: Return the signed result to the Heavy Worker relay
         if: always() && steps.claim.outputs.claimed == 'true'
         env:
-          TASK_ID: ${{ steps.claim.outputs.task_id }
-          RUN_ID: ${{ github.run_id }
-          RUN_ATTEMPT: ${{ github.run_attempt }
-          COMMIT_SHA: ${{ github.sha }
-          ALIGN_OUTCOME: ${{ steps.align.outcome }
+          TASK_ID: ${{ steps.claim.outputs.task_id }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          COMMIT_SHA: ${{ github.sha }}
+          ALIGN_OUTCOME: ${{ steps.align.outcome }}
         run: |
           node <<'NODE'
           const fs = require('fs');
