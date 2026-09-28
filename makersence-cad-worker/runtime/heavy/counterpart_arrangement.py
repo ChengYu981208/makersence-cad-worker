@@ -289,7 +289,7 @@ def solve_instance_arrangement(
         return mesh_state
 
     def pair_proof(left_index: int, right_index: int) -> dict[str, Any] | None:
-        nonlocal exact_pair_checks, exhausted
+        nonlocal exact_pair_checks, exhausted, transformed_cache_peak
         key = tuple(sorted((left_index, right_index)))
         if key in pair_cache:
             return pair_cache[key]
