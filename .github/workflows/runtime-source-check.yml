@@ -79,7 +79,7 @@ jobs:
           PY
       - name: Runtime version markers
         run: |
-          grep -F "2.64.9-lightweight-alignment-child-v4" runtime/heavy/app.py
+          grep -F "2.64.10-compact-exact-alignment-v4" runtime/heavy/app.py
           grep -F "COUNTERPART_ALIGNMENT_CHILD_MODE =" runtime/heavy/app.py
           grep -F "if not COUNTERPART_ALIGNMENT_CHILD_MODE:" runtime/heavy/app.py
           grep -F "2.13.0-08mm-typography" runtime/cad-core-v5/app.py
