@@ -52,7 +52,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Claim one geometry task from the public Heavy Worker relay
+      - name: Claim one geometry task from the Hub over GitHub OIDC
         id: claim
         env:
           RUN_ID: ${{ github.run_id }}
@@ -62,8 +62,8 @@ jobs:
         run: |
           node <<'NODE'
           const fs = require('fs');
-          const worker = 'https://cad-worker-v2-production.up.railway.app';
-          const audience = worker + '/v1/github-runner';
+          const hub = 'https://makersence.hatchable.site';
+          const audience = hub + '/api/research/github-runner';
           function fail(code) { throw new Error(code); }
           async function getOidcToken() {
             const endpoint = String(process.env.ACTIONS_ID_TOKEN_REQUEST_URL || '');
@@ -82,7 +82,7 @@ jobs:
           }
           async function main() {
             const token = await getOidcToken();
-            const response = await fetch(worker + '/v1/github-runner/claim', {
+            const response = await fetch(hub + '/api/research/github-runner-claim', {
               method: 'POST',
               headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
               body: JSON.stringify({
@@ -94,22 +94,27 @@ jobs:
             });
             if (!String(response.headers.get('content-type') || '').toLowerCase().includes('application/json')) fail('WORKER_RESPONSE_NOT_JSON');
             const result = await response.json();
-            if (!response.ok || !result.ok) fail('WORKER_CLAIM_REJECTED');
-            if (!result.task) {
+            if ((response.status === 202 && result.status === 'not_ready') ||
+                (response.status === 503 && result.error === 'RUNNER_NOT_ENABLED')) {
               fs.appendFileSync(process.env.GITHUB_OUTPUT, ['claimed=false', ''].join(String.fromCharCode(10)));
-              console.log('No geometry task is waiting.');
+              console.log(result.error === 'RUNNER_NOT_ENABLED'
+                ? 'Runner is disabled; no task was claimed.'
+                : 'No geometry task is waiting.');
               return;
             }
-            const taskId = String(result.task.task_id || '');
-            const request = result.task.request || {};
+            if (!response.ok || !result.ok) fail('HUB_CLAIM_REJECTED');
+            const taskId = String(result.task_id || '');
+            const jobId = Number(result.job && result.job.id || 0);
+            const request = result.request || {};
             if (!/^[a-f0-9]{32}$/.test(taskId)) fail('TASK_ID_INVALID');
+            if (!Number.isInteger(jobId) || jobId <= 0) fail('HUB_JOB_ID_INVALID');
             for (const key of ['source_url', 'counterpart_url']) {
               const value = String(request[key] || '');
               if (!value.startsWith('https://') || value.length > 4096) fail('GEOMETRY_URL_INVALID');
             }
             if (!Number.isInteger(request.expected_instances) || request.expected_instances < 1 || request.expected_instances > 12) fail('EXPECTED_INSTANCES_INVALID');
             fs.writeFileSync('/tmp/makersence-alignment-request.json', JSON.stringify(request), { mode: 0o600 });
-            fs.appendFileSync(process.env.GITHUB_OUTPUT, ['claimed=true', 'task_id=' + taskId, ''].join(String.fromCharCode(10)));
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, ['claimed=true', 'task_id=' + taskId, 'job_id=' + jobId, ''].join(String.fromCharCode(10)));
             console.log('A signed geometry task was claimed; request details were withheld.');
           }
           main().catch(() => { console.error('Geometry task claim failed; request details were withheld.'); process.exitCode = 1; });
@@ -191,7 +196,7 @@ jobs:
               raise SystemExit("Full-resolution geometry alignment failed; raw worker details were withheld.")
           PY
 
-      - name: Return the signed result to the Heavy Worker relay
+      - name: Return the signed result to the Hub
         if: always() && steps.claim.outputs.claimed == 'true'
         env:
           TASK_ID: ${{ steps.claim.outputs.task_id }}
@@ -202,8 +207,8 @@ jobs:
         run: |
           node <<'NODE'
           const fs = require('fs');
-          const worker = 'https://cad-worker-v2-production.up.railway.app';
-          const audience = worker + '/v1/github-runner';
+          const hub = 'https://makersence.hatchable.site';
+          const audience = hub + '/api/research/github-runner';
           async function getOidcToken() {
             const endpoint = String(process.env.ACTIONS_ID_TOKEN_REQUEST_URL || '');
             const requestToken = String(process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN || '');
@@ -235,7 +240,7 @@ jobs:
               const token = await getOidcToken();
               let response;
               try {
-                response = await fetch(worker + '/v1/github-runner/result', {
+                response = await fetch(hub + '/api/research/github-runner-result', {
                   method: 'POST',
                   headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
                   body,
@@ -248,7 +253,7 @@ jobs:
               let result = {};
               try { result = await response.json(); } catch {}
               if (response.status === 200 && result.ok) {
-                console.log('Signed geometry result was accepted by the Heavy Worker relay.');
+                console.log('Signed geometry result was accepted by the Hub.');
                 return;
               }
               if (response.status === 202 || response.status === 409 || response.status >= 500) {
