@@ -112,7 +112,10 @@ def _manifold_source(mesh: Any) -> dict[str, Any] | None:
         volume = abs(float(source.volume()))
         if not math.isfinite(volume) or volume <= 1e-9:
             return None
-        return {"base": source, "module": m3d, "numpy": np, "volume": volume}
+        diagonal = float(np.linalg.norm(vp.max(axis=0) - vp.min(axis=0)))
+        if not math.isfinite(diagonal) or diagonal <= 1e-9:
+            return None
+        return {"base": source, "module": m3d, "numpy": np, "volume": volume, "diagonal": diagonal}
     except Exception:
         return None
 
@@ -154,25 +157,22 @@ def _relative_pose(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any
 
 def _exact_mesh_clearance(a: Any, b: Any, state: dict[str, Any], required_gap: float) -> dict[str, Any] | None:
     try:
-        module = state["module"]
-        intersection = a ^ b
-        if intersection.status() != module.Error.NoError:
+        if not math.isfinite(required_gap) or required_gap < 0:
             return None
-        overlap_volume = abs(float(intersection.volume()))
-        if not math.isfinite(overlap_volume) or overlap_volume > max(1e-8, state["volume"] * 1e-12):
+        # Both solids are rigid transforms of the same source mesh. A positive
+        # exact surface distance therefore proves they neither touch nor overlap;
+        # avoid allocating a full boolean-intersection mesh for this proof.
+        search_length = max(0.01, state["diagonal"] * 2.0 + required_gap + 0.01)
+        clearance = float(a.min_gap(b, search_length))
+        if not math.isfinite(clearance) or clearance <= 1e-7 or clearance + 1e-4 < required_gap:
             return None
-        if required_gap > 0:
-            search_length = max(required_gap + 0.01, required_gap * 2.0)
-            clearance = float(a.min_gap(b, search_length))
-            if not math.isfinite(clearance) or clearance + 1e-4 < required_gap:
-                return None
-        else:
-            clearance = 0.0
+        conservative_clearance = max(0.0, math.floor(clearance * 1_000_000.0) / 1_000_000.0)
         return {
             "method": "MANIFOLD3D_EXACT_MESH_GAP",
-            "clearance_lower_bound_mm": round(clearance, 6),
-            "overlap_volume_mm3": round(overlap_volume, 9),
+            "clearance_lower_bound_mm": conservative_clearance,
+            "overlap_volume_mm3": 0.0,
             "required_gap_mm": round(required_gap, 6),
+            "separation_basis": "POSITIVE_BOUNDARY_GAP_FOR_CONGRUENT_RIGID_INSTANCES",
             "status": "PASS",
         }
     except Exception:
