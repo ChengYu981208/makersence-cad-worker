@@ -31,6 +31,16 @@ jobs:
       - name: Parse workflow YAML
         run: |
           ruby -e 'require "yaml"; YAML.load_file(".github/workflows/geometry-worker.yml", aliases: true); puts "Workflow YAML parsed."'
+      - name: Check out pinned Heavy Worker source
+        uses: actions/checkout@v4
+        with:
+          ref: 6c3d8801e7118cd42d58468adc939820af953cd1
+          path: worker
+      - name: Build pinned Heavy Worker container
+        run: docker build --pull -f worker/makersence-cad-worker/runtime/heavy/Dockerfile -t makersence-heavy-geometry worker/makersence-cad-worker/runtime/heavy
+      - name: Verify pinned alignment child entry point
+        run: |
+          docker run --rm --entrypoint python makersence-heavy-geometry -c 'from pathlib import Path; p=Path("/app/app.py").read_text(); assert "--counterpart-alignment-child" in p and "counterpart-alignment-v4-exact-mesh-gap-bounded" in p and "alignment_result.json" in p; print("Pinned Heavy Worker alignment child is present.")'
 
   run-one-geometry-task:
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
