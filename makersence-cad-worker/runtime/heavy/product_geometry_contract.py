@@ -144,7 +144,14 @@ def _complete_multi_instance_alignment(alignment: dict, expected: int, matched: 
     selections = _list(alignment.get("instance_interface_selections"))
     arrangement = _dict(alignment.get("instance_arrangement"))
     gap = _number(arrangement.get("minimum_instance_gap_mm"))
+    pair_proof_rows = _list(arrangement.get("clearance_pair_proofs"))
     pair_proofs_ready, exact_gap_used = _valid_clearance_pair_proofs(arrangement, expected, gap) if gap is not None else (False, False)
+    legacy_aabb_evidence = (
+        not pair_proof_rows
+        and alignment.get("instance_solution_method") == "BOUNDED_NONOVERLAPPING_AABB_ARRANGEMENT_V1"
+        and arrangement.get("separation_proof") == "NONOVERLAPPING_AXIS_ALIGNED_BOUNDING_BOXES"
+    )
+    pair_proofs_ready = pair_proofs_ready or legacy_aabb_evidence
     expected_method = (
         "BOUNDED_MANIFOLD3D_MESH_GAP_ARRANGEMENT_V1" if exact_gap_used
         else "BOUNDED_NONOVERLAPPING_AABB_ARRANGEMENT_V1"
