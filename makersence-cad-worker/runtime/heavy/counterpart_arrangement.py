@@ -79,7 +79,11 @@ def _aabb_clearance_lower_bound(a: dict[str, Any], b: dict[str, Any]) -> float |
     return max(gaps) if gaps else None
 
 
-def _manifold_source(mesh: Any) -> dict[str, Any] | None:
+def _manifold_source(
+    mesh: Any,
+    simplify_tolerance_mm: float,
+    stage_callback: Callable[[str], None] | None = None,
+) -> dict[str, Any] | None:
     if not isinstance(mesh, dict):
         return None
     vertices = mesh.get("vertices")
@@ -115,7 +119,38 @@ def _manifold_source(mesh: Any) -> dict[str, Any] | None:
         diagonal = float(np.linalg.norm(vp.max(axis=0) - vp.min(axis=0)))
         if not math.isfinite(diagonal) or diagonal <= 1e-9:
             return None
-        return {"base": source, "module": m3d, "numpy": np, "volume": volume, "diagonal": diagonal}
+
+        source_triangle_count = int(source.num_tri())
+        tolerance = max(float(simplify_tolerance_mm), float(source.get_tolerance()))
+        if not math.isfinite(tolerance) or tolerance <= 0:
+            return None
+        if callable(stage_callback):
+            stage_callback("manifold_simplification_start")
+        clearance_source = source.simplify(tolerance)
+        if (
+            clearance_source.status() != m3d.Error.NoError
+            or clearance_source.is_empty()
+            or int(clearance_source.num_tri()) < 4
+        ):
+            return None
+        clearance_volume = abs(float(clearance_source.volume()))
+        if not math.isfinite(clearance_volume) or clearance_volume <= 1e-9:
+            return None
+        clearance_triangle_count = int(clearance_source.num_tri())
+        if callable(stage_callback):
+            stage_callback("manifold_simplification_complete")
+        del source
+        return {
+            "base": clearance_source,
+            "module": m3d,
+            "numpy": np,
+            "volume": clearance_volume,
+            "source_volume": volume,
+            "diagonal": diagonal,
+            "source_triangle_count": source_triangle_count,
+            "clearance_triangle_count": clearance_triangle_count,
+            "simplification_tolerance_mm": tolerance,
+        }
     except Exception:
         return None
 
@@ -159,25 +194,33 @@ def _exact_mesh_clearance(a: Any, b: Any, state: dict[str, Any], required_gap: f
     try:
         if not math.isfinite(required_gap) or required_gap < 0:
             return None
-        # Both solids are rigid transforms of the same source mesh. A positive
-        # exact surface distance therefore proves they neither touch nor overlap;
-        # avoid allocating a full boolean-intersection mesh for this proof.
-        # We only need a conservative lower bound that proves the required
-        # clearance. MinGap returns a value in [0, search_length], so searching
-        # beyond the manufacturing gap adds no evidence and needlessly explores
-        # distant triangle pairs on dense imported meshes.
-        search_length = min(25.0, max(0.01, required_gap + 0.01))
-        clearance = float(a.min_gap(b, search_length))
-        if not math.isfinite(clearance) or clearance <= 1e-7 or clearance + 1e-4 < required_gap:
+        # MinGap runs on a tolerance-simplified copy. Manifold3D guarantees
+        # every simplified surface point stays within tolerance of its source.
+        # Each of the two rigid instances can therefore move by at most this
+        # tolerance, so subtract 2*tolerance to retain a conservative lower
+        # bound for the original meshes.
+        tolerance = _number(state.get("simplification_tolerance_mm"))
+        if tolerance is None or tolerance <= 0:
             return None
-        conservative_clearance = max(0.0, math.floor(clearance * 1_000_000.0) / 1_000_000.0)
+        search_length = min(25.0, max(0.01, required_gap + 2.0 * tolerance + 0.01))
+        measured_clearance = float(a.min_gap(b, search_length))
+        if not math.isfinite(measured_clearance) or measured_clearance <= 1e-7:
+            return None
+        lower_bound = max(
+            0.0,
+            math.floor((measured_clearance - 2.0 * tolerance) * 1_000_000.0) / 1_000_000.0,
+        )
+        if lower_bound + 1e-4 < required_gap:
+            return None
         return {
-            "method": "MANIFOLD3D_EXACT_MESH_GAP",
-            "clearance_lower_bound_mm": conservative_clearance,
+            "method": "MANIFOLD3D_SIMPLIFIED_EXACT_MESH_GAP",
+            "clearance_lower_bound_mm": lower_bound,
+            "measured_simplified_clearance_mm": round(measured_clearance, 6),
+            "surface_approximation_error_bound_mm": round(tolerance, 6),
             "overlap_volume_mm3": 0.0,
             "required_gap_mm": round(required_gap, 6),
             "search_length_mm": round(search_length, 6),
-            "separation_basis": "POSITIVE_BOUNDARY_GAP_FOR_CONGRUENT_RIGID_INSTANCES",
+            "separation_basis": "SIMPLIFICATION_HAUSDORFF_ERROR_BOUND",
             "status": "PASS",
         }
     except Exception:
@@ -197,6 +240,7 @@ def solve_instance_arrangement(
     uniqueness_absolute_gap: float = 8.0,
     uniqueness_relative_gap: float = 0.035,
     source_mesh: dict[str, Any] | None = None,
+    consume_source_mesh: bool = False,
     max_exact_pair_checks: int = 500,
     stage_callback: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
@@ -273,6 +317,7 @@ def solve_instance_arrangement(
     mesh_state_checked = False
     source_triangles = source_mesh.get("triangles") if isinstance(source_mesh, dict) else None
     source_triangle_count = len(source_triangles) if source_triangles is not None else 0
+    del source_triangles
     transformed_cache_capacity = 1 if source_mesh is not None else 0
     transformed_cache_peak = 0
     pair_cache: dict[tuple[int, int], dict[str, Any] | None] = {}
@@ -285,10 +330,21 @@ def solve_instance_arrangement(
                 pass
 
     def ensure_mesh_state() -> dict[str, Any] | None:
-        nonlocal mesh_state, mesh_state_checked
+        nonlocal mesh_state, mesh_state_checked, source_mesh
         if not mesh_state_checked:
             report_stage("manifold_source_start")
-            mesh_state = _manifold_source(source_mesh)
+            simplification_tolerance = min(0.05, max(0.0005, gap * 0.1))
+            mesh_state = _manifold_source(
+                source_mesh,
+                simplification_tolerance,
+                stage_callback=report_stage,
+            )
+            if consume_source_mesh and isinstance(source_mesh, dict):
+                # Transfer ownership of large arrays out of the caller before
+                # pairwise clearance allocates its native acceleration data.
+                source_mesh["vertices"] = None
+                source_mesh["triangles"] = None
+                source_mesh = None
             mesh_state_checked = True
             report_stage("manifold_source_ready" if mesh_state is not None else "manifold_source_unavailable")
         return mesh_state
@@ -309,7 +365,7 @@ def solve_instance_arrangement(
             }
             pair_cache[key] = proof
             return proof
-        if source_mesh is None or exact_pair_checks >= max(1, int(max_exact_pair_checks)):
+        if (source_mesh is None and mesh_state is None) or exact_pair_checks >= max(1, int(max_exact_pair_checks)):
             if source_mesh is not None:
                 exhausted = True
             pair_cache[key] = None
@@ -411,7 +467,7 @@ def solve_instance_arrangement(
         })
     selected = [unique[i] for i in best[1]] if unique_solution and best else []
     selected_proofs = best[2] if unique_solution and best else []
-    exact_used = any(row.get("method") == "MANIFOLD3D_EXACT_MESH_GAP" for row in selected_proofs)
+    exact_used = any(row.get("method") == "MANIFOLD3D_SIMPLIFIED_EXACT_MESH_GAP" for row in selected_proofs)
     return {
         "status": "ALIGNED" if unique_solution else "REVIEW_REQUIRED",
         "confidence": "HIGH" if unique_solution else "MEDIUM" if best and not exhausted else "LOW",
@@ -431,6 +487,13 @@ def solve_instance_arrangement(
         "exact_pair_checks": exact_pair_checks,
         "transformed_pose_cache_capacity": transformed_cache_capacity,
         "transformed_pose_cache_peak": transformed_cache_peak,
+        "source_mesh_triangle_count": source_triangle_count,
+        "clearance_mesh_triangle_count": (
+            mesh_state.get("clearance_triangle_count") if mesh_state is not None else None
+        ),
+        "simplification_tolerance_mm": (
+            mesh_state.get("simplification_tolerance_mm") if mesh_state is not None else None
+        ),
         "supported_pose_count": len(unique),
         "minimum_instance_gap_mm": gap,
         "arrangement_score_gap": round(score_gap, 4) if score_gap is not None else None,
@@ -438,7 +501,7 @@ def solve_instance_arrangement(
         "candidate_arrangements": alternatives,
         "clearance_pair_proofs": selected_proofs,
         "separation_proof": (
-            "AABB_AND_MANIFOLD3D_EXACT_GAP" if exact_used
+            "AABB_AND_MANIFOLD3D_CONSERVATIVE_GAP" if exact_used
             else "NONOVERLAPPING_AXIS_ALIGNED_BOUNDING_BOXES"
         ),
     }
