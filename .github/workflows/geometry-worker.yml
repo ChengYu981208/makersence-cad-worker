@@ -29,7 +29,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Parse workflow YAML
-        run: ruby -e "require 'yaml'; YAML.load_file('.github/workflows/geometry-worker.yml', aliases: true); puts 'Workflow YAML parsed.'"
+        run: |
+          ruby -e 'require "yaml"; YAML.load_file(".github/workflows/geometry-worker.yml", aliases: true); puts "Workflow YAML parsed."'
 
   run-one-geometry-task:
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
