@@ -22,7 +22,7 @@ jobs:
           cache-dependency-path: makersence-cad-worker/requirements.txt
       - name: Install dependencies
         run: pip install -r requirements.txt
-      - name: Run worker tests
+      - name: Run application worker tests
         env:
           PYTHONPATH: .
-        run: pytest -q
+        run: pytest -q tests

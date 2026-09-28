@@ -5,16 +5,28 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from urllib.request import Request, urlopen
 
-from design_model_router import design_model_provider_status, route_design_model
+# Alignment only needs the mesh parser and bounded Manifold checks. It runs in
+# a subprocess beside the long-lived CAD service, so avoid loading OpenCascade,
+# Pillow, SVG, and Shapely into a second process under the 1 GB container cap.
+COUNTERPART_ALIGNMENT_CHILD_MODE = len(sys.argv) >= 4 and sys.argv[1] == "--counterpart-alignment-child"
+if COUNTERPART_ALIGNMENT_CHILD_MODE:
+    print("COUNTERPART_ALIGNMENT_STAGE:bootstrap:lightweight_imports", flush=True)
 
-import cadquery as cq
-from cadquery import exporters
-from PIL import Image, ImageDraw, ImageFilter
-from svgpathtools import parse_path
-from shapely.geometry import Polygon, MultiPolygon, GeometryCollection, Point, LineString, box as shapely_box
-from shapely.ops import unary_union
-from shapely.affinity import translate as geom_translate
-from shapely.validation import explain_validity
+from design_model_router import design_model_provider_status, route_design_model
+from product_geometry_contract import is_interface_preserving_scope, protected_rebuild_blockers
+from counterpart_arrangement import solve_instance_arrangement
+from counterpart_mesh import load_3mf_assembly_mesh
+from github_runner_relay import RelayError, enqueue_task, claim_task, complete_task, get_task
+
+if not COUNTERPART_ALIGNMENT_CHILD_MODE:
+    import cadquery as cq
+    from cadquery import exporters
+    from PIL import Image, ImageDraw, ImageFilter
+    from svgpathtools import parse_path
+    from shapely.geometry import Polygon, MultiPolygon, GeometryCollection, Point, LineString, box as shapely_box
+    from shapely.ops import unary_union
+    from shapely.affinity import translate as geom_translate
+    from shapely.validation import explain_validity
 
 TOKEN=os.environ.get("WORKER_TOKEN","")
 PORT=int(os.environ.get("PORT","8000"))
@@ -23,6 +35,7 @@ ROOT.mkdir(parents=True,exist_ok=True)
 JOBS={}
 SLICE_JOBS={}
 MOTION_JOBS={}
+ALIGNMENT_JOBS={}
 BAMBU_BIN=os.environ.get("BAMBU_BIN","")
 BAMBU_VERSION=os.environ.get("BAMBU_VERSION","2.8.2.61")
 BAMBU_HOME=pathlib.Path("/tmp/bambu-home")
@@ -44,6 +57,9 @@ def current_rss_mb():
         m=re.search(r"^VmRSS:\s+(\d+)\s+kB",txt,re.M)
         return round(int(m.group(1))/1024.0,1) if m else 0.0
     except Exception:return 0.0
+
+def _counterpart_alignment_stage(name):
+    print("COUNTERPART_ALIGNMENT_STAGE:"+str(name)+":rss_mb="+str(current_rss_mb()),flush=True)
 
 def resource_policy(req):
     c=req.get("cad_contract") or {}
@@ -1352,6 +1368,9 @@ def _hybrid_apply_functional_core(shape,c):
     return cut,meta
 
 def design_model_hybrid(c,req):
+    if is_interface_preserving_scope(c):
+        blockers=protected_rebuild_blockers(c)
+        raise ValueError("INTERFACE_PRESERVING_REBUILD_BLOCKED:"+",".join(blockers))
     dm=c.get("design_model") or {}
     image_url=str(dm.get("source_image_url") or "")
     if not re.match(r"^https://",image_url,re.I):raise ValueError("DESIGN_MODEL_HYBRID_IMAGE_URL_REQUIRED")
@@ -3500,6 +3519,56 @@ def _submit_motion_job(req):
     t=threading.Thread(target=_motion_job_runner,args=(jid,req),daemon=True,name="makersence-motion-"+jid[-8:]);t.start()
     return {"job_id":jid,"status":"queued","execution_mode":"isolated_subprocess"}
 
+def _counterpart_alignment_job_runner(jid,req):
+    folder=ROOT/jid;folder.mkdir(parents=True,exist_ok=True)
+    request_path=folder/"alignment_request.json";result_path=folder/"alignment_result.json";log_path=folder/"alignment_child.log"
+    started=time.time()
+    with HEAVY_JOB_SEMAPHORE:
+        try:
+            request_path.write_text(json.dumps(req,ensure_ascii=False),encoding="utf-8")
+            ALIGNMENT_JOBS[jid].update({"status":"processing","stage":"isolated_starting","execution_mode":"isolated_subprocess","started_at":started,"updated_at":time.time()})
+            with log_path.open("wb") as log:
+                proc=subprocess.Popen([sys.executable,str(pathlib.Path(__file__).resolve()),"--counterpart-alignment-child",jid,str(folder)],stdout=log,stderr=subprocess.STDOUT,env=os.environ.copy())
+                ALIGNMENT_JOBS[jid].update({"stage":"isolated_running","child_pid":int(proc.pid),"updated_at":time.time()})
+                timeout=max(60,min(600,int(f(req.get("alignment_timeout_seconds"),240))))
+                try:rc=proc.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    proc.kill();proc.wait(timeout=10)
+                    raise TimeoutError("COUNTERPART_ALIGNMENT_CHILD_TIMEOUT:"+str(timeout))
+            if not result_path.exists():
+                raise RuntimeError("COUNTERPART_ALIGNMENT_CHILD_NO_RESULT:exit="+str(rc)+":"+_job_log_tail(log_path,2500))
+            child=json.loads(result_path.read_text(encoding="utf-8"))
+            if not isinstance(child,dict) or child.get("status")!="completed" or not isinstance(child.get("result"),dict):
+                raise RuntimeError("COUNTERPART_ALIGNMENT_CHILD_INVALID_RESULT:"+str(child)[:800])
+            ALIGNMENT_JOBS[jid].update({"status":"completed","stage":"completed","result":child["result"],"error":None,"execution_mode":"isolated_subprocess","child_exit_code":int(rc),"duration_ms":int((time.time()-started)*1000),"completed_at":time.time(),"updated_at":time.time()})
+        except Exception as ex:
+            ALIGNMENT_JOBS[jid].update({"status":"failed","stage":"failed","error":str(ex)[:1200],"execution_mode":"isolated_subprocess","duration_ms":int((time.time()-started)*1000),"child_log_tail":_job_log_tail(log_path,2500),"completed_at":time.time(),"updated_at":time.time()})
+        finally:
+            try:request_path.unlink(missing_ok=True)
+            except Exception:pass
+            gc.collect();_malloc_trim()
+
+def _counterpart_alignment_child_cli(jid,folder):
+    folder=pathlib.Path(folder);request_path=folder/"alignment_request.json";result_path=folder/"alignment_result.json"
+    _counterpart_alignment_stage("child_imports_complete")
+    req=json.loads(request_path.read_text(encoding="utf-8"))
+    _counterpart_alignment_stage("request_loaded")
+    result=align_counterpart_urls(req.get("source_url"),req.get("counterpart_url"),req.get("relation") or "support",req.get("expected_instances",1),req.get("counterpart_context"),req.get("source_part_ids"))
+    out={"status":"completed","result":result,"completed_at":time.time()}
+    tmp=result_path.with_suffix(".tmp");tmp.write_text(json.dumps(out,ensure_ascii=False),encoding="utf-8");tmp.replace(result_path)
+    return 0
+
+def _submit_counterpart_alignment_job(req):
+    key=str(req.get("idempotency_key") or "").strip()[:180]
+    if key:
+        for jid,job in list(ALIGNMENT_JOBS.items()):
+            if job.get("idempotency_key")==key and job.get("status") in ("queued","processing","completed"):
+                return {"job_id":jid,"status":job["status"],"execution_mode":job.get("execution_mode") or "isolated_subprocess","reused":True}
+    jid="align-"+str(uuid.uuid4())
+    ALIGNMENT_JOBS[jid]={"status":"queued","stage":"queued","result":None,"error":None,"execution_mode":"isolated_subprocess","idempotency_key":key or None,"created_at":time.time(),"updated_at":time.time()}
+    t=threading.Thread(target=_counterpart_alignment_job_runner,args=(jid,req),daemon=True,name="makersence-align-"+jid[-8:]);t.start()
+    return {"job_id":jid,"status":"queued","execution_mode":"isolated_subprocess","reused":False}
+
 def _dw_drawing(z,part,world=None):
     if not part:return {'version':'cad-drawing-v1','status':'unavailable','reason':'no_part'}
     mesh=_dw_extract_mesh(z,part,world)
@@ -4269,14 +4338,93 @@ def _ca_pose_score(points,m,t,h,src_bbox,contact_mm=1.8,near_mm=4.0):
     score+=span_good*8.0
     return {"score":round(score,4),"contact_count":c,"sample_count":n,"contact_ratio":round(cr,4),"near_ratio":round(nr,4),"intrusion_ratio":round(ir,4),"contact_bbox_mm":{"min":[round(x,3) for x in (_ca_bbox(contact)["min"] if c else [0,0,0])],"max":[round(x,3) for x in (_ca_bbox(contact)["max"] if c else [0,0,0])],"dimensions":[round(x,3) for x in span]},"pose_bbox_mm":{"min":[round(x,3) for x in b["min"]],"max":[round(x,3) for x in b["max"]],"dimensions":[round(x,3) for x in b["dimensions"]]},"axis_overlap_ratio":[round(x,3) for x in ov]}
 
+def _ca_counterpart_mesh_evidence(mesh):
+    vv=mesh.get("vertices")
+    tt=mesh.get("triangles")
+    if vv is None:vv=[]
+    if tt is None:tt=[]
+    if len(tt)<4 or len(tt)>30000 or len(vv)<4 or len(vv)>18000:
+        return {"status":"unavailable","reason":"counterpart_mesh_budget_exceeded","vertex_count":len(vv),"triangle_count":len(tt)}
+    vertices=[]
+    for p in vv:
+        if hasattr(p,"tolist"):p=p.tolist()
+        if not isinstance(p,(list,tuple)) or len(p)!=3:
+            return {"status":"unavailable","reason":"counterpart_mesh_vertex_invalid"}
+        row=[float(x) for x in p]
+        if not all(math.isfinite(x) for x in row):
+            return {"status":"unavailable","reason":"counterpart_mesh_vertex_nonfinite"}
+        vertices.append(row)
+    triangles=[]
+    for tri in tt:
+        if hasattr(tri,"tolist"):tri=tri.tolist()
+        if not isinstance(tri,(list,tuple)) or len(tri)!=3:
+            return {"status":"unavailable","reason":"counterpart_mesh_triangle_invalid"}
+        try: row=[int(x) for x in tri]
+        except Exception:return {"status":"unavailable","reason":"counterpart_mesh_triangle_index_invalid"}
+        if len(set(row))!=3 or min(row)<0 or max(row)>=len(vertices):
+            return {"status":"unavailable","reason":"counterpart_mesh_triangle_index_invalid"}
+        a,b,c=[vertices[i] for i in row]
+        ab=[b[i]-a[i] for i in range(3)];ac=[c[i]-a[i] for i in range(3)]
+        cross=[ab[1]*ac[2]-ab[2]*ac[1],ab[2]*ac[0]-ab[0]*ac[2],ab[0]*ac[1]-ab[1]*ac[0]]
+        if sum(x*x for x in cross)<=1e-20:
+            return {"status":"unavailable","reason":"counterpart_mesh_degenerate_triangle"}
+        triangles.append(row)
+    stats=mesh_edge_stats(vertices,triangles)
+    if int(stats.get("open_edges") or 0)!=0 or int(stats.get("nonmanifold_edges") or 0)!=0:
+        return {"status":"unavailable","reason":"counterpart_mesh_not_closed_manifold","open_edges":stats.get("open_edges"),"nonmanifold_edges":stats.get("nonmanifold_edges")}
+    signed_volume=0.0
+    for ia,ib,ic in triangles:
+        a,b,c=vertices[ia],vertices[ib],vertices[ic]
+        signed_volume+=(a[0]*(b[1]*c[2]-b[2]*c[1])+a[1]*(b[2]*c[0]-b[0]*c[2])+a[2]*(b[0]*c[1]-b[1]*c[0]))/6.0
+    if not math.isfinite(signed_volume) or abs(signed_volume)<=1e-8:
+        return {"status":"unavailable","reason":"counterpart_mesh_enclosed_volume_unresolved"}
+    if signed_volume<0:
+        triangles=[[a,c,b] for a,b,c in triangles]
+        signed_volume=-signed_volume
+    payload={"v":[[round(x,4) for x in p] for p in vertices],"t":triangles}
+    packed=base64.b64encode(zlib.compress(json.dumps(payload,separators=(",",":")).encode("utf-8"),6)).decode("ascii")
+    if len(packed)>1500000:
+        return {"status":"unavailable","reason":"counterpart_mesh_payload_budget_exceeded","vertex_count":len(vertices),"triangle_count":len(triangles),"payload_bytes":len(packed)}
+    return {"status":"ready","strategy":"FACETED_MESH_BREP","encoding":"zlib_base64_json_v1","payload":packed,
+            "vertex_count":len(vertices),"triangle_count":len(triangles),"open_edges":0,"nonmanifold_edges":0,
+            "absolute_volume_mm3":round(signed_volume,6),"bounds_mm":_ca_bbox(vertices),
+            "coordinate_rounding_bound_mm":0.0001,"coordinate_frame":"COUNTERPART_3MF_OBJECT_FRAME","source":"MEASURED_3MF_OBJECT_MESH"}
+
 def _ca_orientation_affinity(src_dims,cb):
     d=cb["dimensions"];errs=sorted(abs(math.log(max(.05,d[i])/max(.05,src_dims[i]))) for i in range(3))
     return errs[0]+errs[1]
 
-def align_counterpart_urls(source_url,counterpart_url,relation="support"):
+def _ca_instance_alignment_evidence(expected_instances,confidence,transform):
+    expected=int(expected_instances)
+    rotation=(transform or {}).get("rotation_matrix")
+    translation=(transform or {}).get("translation_mm")
+    valid=(isinstance(rotation,list) and len(rotation)==3 and all(isinstance(r,list) and len(r)==3 for r in rotation)
+           and isinstance(translation,list) and len(translation)==3)
+    if valid:
+        try:
+            rotation=[[float(x) for x in row] for row in rotation]
+            translation=[float(x) for x in translation]
+            valid=all(math.isfinite(x) for row in rotation for x in row) and all(math.isfinite(x) for x in translation)
+        except Exception:valid=False
+    transforms=[{"rotation_matrix":rotation,"translation_mm":translation}] if valid else []
+    matched=len(transforms)
+    return {"status":"ALIGNED" if confidence=="HIGH" and expected==1 and matched==1 else "REVIEW_REQUIRED",
+            "expected_instances":expected,"matched_instances":matched,"instance_transforms":transforms,
+            "instance_solution_method":"SINGLE_INSTANCE_POSE_ONLY","instance_solution_complete":matched==expected}
+
+def align_counterpart_urls(source_url,counterpart_url,relation="support",expected_instances=1,counterpart_context=None,source_part_ids=None):
+    _counterpart_alignment_stage("alignment_started")
+    try:expected_instances=max(1,min(12,int(expected_instances or 1)))
+    except Exception:raise ValueError("counterpart expected_instances must be an integer from 1 to 12")
     sp,sbytes=_ca_download_3mf(source_url,"source");cp,cbytes=_ca_download_3mf(counterpart_url,"counterpart")
-    src=_ca_largest_mesh_3mf(sp);ctr=_ca_largest_mesh_3mf(cp)
-    src_surface=_ca_surface_samples(src,12000);h=_ca_hash(src_surface,5.0);ctr_pts=_ca_point_samples(ctr,900)
+    _counterpart_alignment_stage("3mf_downloaded")
+    src=load_3mf_assembly_mesh(sp,part_object_ids=source_part_ids);ctr=_ca_largest_mesh_3mf(cp)
+    source_vertex_count=len(src.get("vertices") or []);source_triangle_count=len(src.get("triangles") or [])
+    counterpart_vertex_count=len(ctr.get("vertices") or []);counterpart_triangle_count=len(ctr.get("triangles") or [])
+    _counterpart_alignment_stage("meshes_loaded:source_v="+str(source_vertex_count)+":source_t="+str(source_triangle_count)+":counterpart_v="+str(counterpart_vertex_count)+":counterpart_t="+str(counterpart_triangle_count))
+    src_surface=_ca_surface_samples(src,12000);h=_ca_hash(src_surface,5.0);del src_surface
+    ctr_pts=_ca_point_samples(ctr,900)
+    _counterpart_alignment_stage("sampling_complete")
     rotations=_ca_rotations()
     ranked=sorted([(round(_ca_orientation_affinity(src["bbox"]["dimensions"],_ca_rot_bbox(ctr["bbox"],m)),6),m) for m in rotations],key=lambda x:x[0])[:10]
     coarse=[]
@@ -4302,7 +4450,7 @@ def align_counterpart_urls(source_url,counterpart_url,relation="support"):
         key=tuple(round(x/4.0) for x in row[2])+(tuple(int(v) for rr in row[1] for v in rr),)
         if key in seen:continue
         seen.add(key);seeds.append(row)
-        if len(seeds)>=6:break
+        if len(seeds)>=(14 if expected_instances>1 else 6):break
     refined=[]
     offsets=(-9,-6,-3,0,3,6,9)
     for base,m,t0,met0,aff in seeds:
@@ -4312,9 +4460,10 @@ def align_counterpart_urls(source_url,counterpart_url,relation="support"):
          t=[t0[0]+dx,t0[1]+dy,t0[2]+dz];met=_ca_pose_score(ctr_pts,m,t,h,src["bbox"])
          refined.append((met["score"]-aff*6.0,m,t,met,aff))
     refined.sort(key=lambda x:x[0],reverse=True)
+    _counterpart_alignment_stage("coarse_and_refined_search_complete")
     exact_records=_ca_triangle_records(src);exact_hash=_ca_triangle_hash(exact_records,6.0)
     exact_rows=[]
-    for row in refined[:60]:
+    for row in refined[:(150 if expected_instances>1 else 60)]:
         em=_ca_pose_score_exact(ctr_pts,row[1],row[2],exact_records,exact_hash,src["bbox"])
         exact_rows.append((em["score"]-row[4]*6.0,row[1],row[2],em,row[4]))
     exact_rows.sort(key=lambda x:x[0],reverse=True)
@@ -4332,27 +4481,98 @@ def align_counterpart_urls(source_url,counterpart_url,relation="support"):
     contact_ok=met.get("contact_count",0)>=max(14,int(len(ctr_pts)*.018))
     intrusion_ok=met.get("intrusion_ratio",1)<=.22
     span_ok=span_axes>=2
-    uniqueness_ok=second is None or gap>=max(8.0,abs(best[0])*.035)
-    confidence="HIGH" if contact_ok and intrusion_ok and span_ok and uniqueness_ok else ("MEDIUM" if contact_ok and intrusion_ok and span_ok else "LOW")
+    pose_uniqueness_ok=second is None or gap>=max(8.0,abs(best[0])*.035)
+    if expected_instances>1:
+        alignment_candidates=[]
+        for row in exact_rows:
+            mm=row[3]
+            alignment_candidates.append({
+                "score":row[0],
+                "rotation_matrix":[[int(v) for v in rr] for rr in row[1]],
+                "translation_mm":[round(x,3) for x in row[2]],
+                "contact_count":mm.get("contact_count"),
+                "sample_count":mm.get("sample_count"),
+                "intrusion_ratio":mm.get("intrusion_ratio"),
+                "contact_bbox_mm":mm.get("contact_bbox_mm"),
+                "pose_bbox_mm":mm.get("pose_bbox_mm"),
+                "pose_metrics":mm,
+            })
+        _counterpart_alignment_stage("exact_pose_scoring_complete")
+        # The source's full mesh and triangle-record index are no longer needed
+        # after pose scoring. Compact the collision mesh before native Manifold
+        # construction so Python lists do not coexist with duplicate native data.
+        import numpy as np
+        ctr["vertices"]=np.ascontiguousarray(ctr["vertices"],dtype=np.float32)
+        ctr["triangles"]=np.ascontiguousarray(ctr["triangles"],dtype=np.uint32)
+        src["vertices"]=[]
+        src["triangles"]=[]
+        del exact_records,exact_hash,coarse,refined
+        gc.collect();_malloc_trim()
+        _counterpart_alignment_stage("arrangement_inputs_compacted:source_t="+str(source_triangle_count)+":counterpart_t="+str(counterpart_triangle_count))
+        instance_alignment=solve_instance_arrangement(
+            alignment_candidates,expected_instances,
+            source_dimensions_mm=src["bbox"]["dimensions"],
+            minimum_contact_count=max(14,int(len(ctr_pts)*.018)),
+            minimum_gap_mm=0.0,
+            maximum_intrusion_ratio=.22,
+            source_mesh=ctr,
+            max_exact_pair_checks=500,
+            stage_callback=_counterpart_alignment_stage,
+        )
+        confidence=instance_alignment["confidence"]
+        uniqueness_ok=instance_alignment["arrangement_unique"]
+    else:
+        confidence="HIGH" if contact_ok and intrusion_ok and span_ok and pose_uniqueness_ok else ("MEDIUM" if contact_ok and intrusion_ok and span_ok else "LOW")
+        uniqueness_ok=pose_uniqueness_ok
+        instance_alignment=_ca_instance_alignment_evidence(expected_instances,confidence,{"rotation_matrix":[[int(v) for v in rr] for rr in best[1]],"translation_mm":[round(x,3) for x in best[2]]})
+    selected_instances=instance_alignment.get("instance_transforms") or []
+    if selected_instances:
+        primary=selected_instances[0]
+        primary_m=primary["rotation_matrix"]
+        primary_t=primary["translation_mm"]
+        met=primary.get("pose_metrics") or met
+    else:
+        primary_m=best[1]
+        primary_t=best[2]
     cbox=met.get("contact_bbox_mm") or {};cd=cbox.get("dimensions") or [0,0,0]
     axis_i=min(range(3),key=lambda i:cd[i] if cd[i]>0 else 1e9)
     raw_plane=((cbox.get("min") or [0,0,0])[axis_i]+(cbox.get("max") or [0,0,0])[axis_i])/2
     plane=raw_plane-src["bbox"]["min"][axis_i]
     band=max(2.4,min(14.0,(cd[axis_i] if cd[axis_i]>0 else 4.0)+2.0))
+    instance_interface_selections=[]
+    for index,pose in enumerate(selected_instances):
+        pose_metrics=pose.get("pose_metrics") or (met if index==0 else {})
+        pose_box=pose_metrics.get("contact_bbox_mm") or {}
+        pose_dims=pose_box.get("dimensions") or [0,0,0]
+        pose_axis=min(range(3),key=lambda i:pose_dims[i] if pose_dims[i]>0 else 1e9)
+        pose_raw=((pose_box.get("min") or [0,0,0])[pose_axis]+(pose_box.get("max") or [0,0,0])[pose_axis])/2
+        instance_interface_selections.append({
+            "instance_index":index,
+            "axis":"XYZ"[pose_axis],
+            "plane_mm":round(pose_raw-src["bbox"]["min"][pose_axis],3),
+            "raw_source_plane_mm":round(pose_raw,3),
+            "band_mm":round(max(2.4,min(14.0,(pose_dims[pose_axis] if pose_dims[pose_axis]>0 else 4.0)+2.0)),3),
+            "span_mm":round(max(pose_dims),3),
+            "confidence":confidence,
+            "transform":{"rotation_matrix":pose["rotation_matrix"],"translation_mm":pose["translation_mm"]},
+            "coordinate_frame":"source_assembly_min_normalized",
+        })
     solution_rows=[]
     for row in distinct[:5]:
         mm=row[3];cb=mm.get("contact_bbox_mm") or {};cc=[((cb.get("min") or [0,0,0])[i]+(cb.get("max") or [0,0,0])[i])/2 for i in range(3)]
         solution_rows.append({"score":round(row[0],3),"rotation_matrix":[[int(v) for v in rr] for rr in row[1]],"translation_mm":[round(x,3) for x in row[2]],"contact_count":mm.get("contact_count"),"intrusion_ratio":mm.get("intrusion_ratio"),"contact_bbox_mm":cb,"contact_center_mm":[round(x,3) for x in cc]})
     return {
-      "status":"ALIGNED" if confidence=="HIGH" else "REVIEW_REQUIRED",
+      "status":instance_alignment["status"],
       "version":"counterpart-alignment-v1",
+      "algorithm_version":"counterpart-alignment-v4-exact-mesh-gap-bounded",
       "confidence":confidence,
       "relation":str(relation or "support"),
-      "source":{"name":src.get("name"),"dimensions_mm":[round(x,3) for x in src["bbox"]["dimensions"]],"triangle_count":len(src["triangles"]),"file_size_bytes":sbytes},
-      "counterpart":{"name":ctr.get("name"),"dimensions_mm":[round(x,3) for x in ctr["bbox"]["dimensions"]],"triangle_count":len(ctr["triangles"]),"file_size_bytes":cbytes},
-      "transform":{"rotation_matrix":[[int(v) for v in rr] for rr in best[1]],"translation_mm":[round(x,3) for x in best[2]]},
-      "metrics":{**met,"score_gap":round(gap,3),"orientation_affinity":best[4],"distinct_solution_count":len(distinct),"checks":{"contact_support":contact_ok,"low_intrusion":intrusion_ok,"contact_span":span_ok,"solution_unique":uniqueness_ok},"solutions":solution_rows},
-      "interface_selection":{"axis":"XYZ"[axis_i],"plane_mm":round(plane,3),"raw_source_plane_mm":round(raw_plane,3),"band_mm":round(band,3),"span_mm":round(max(cd),3),"confidence":confidence,"reason":"counterpart_geometry_contact_alignment_v1","coordinate_frame":"source_largest_part_min_normalized"},
+      "source":{"name":src.get("name"),"dimensions_mm":[round(x,3) for x in src["bbox"]["dimensions"]],"triangle_count":source_triangle_count,"file_size_bytes":sbytes,"assembly":src.get("assembly")},
+      "counterpart":{"name":ctr.get("name"),"dimensions_mm":[round(x,3) for x in ctr["bbox"]["dimensions"]],"triangle_count":counterpart_triangle_count,"file_size_bytes":cbytes,"identity":{k:str((counterpart_context or {}).get(k) or "")[:160] for k in ("model_id","profile_id","instance_id") if (counterpart_context or {}).get(k)},"geometry_evidence":{"mesh_brep":_ca_counterpart_mesh_evidence(ctr)}},
+      "expected_instances":instance_alignment["expected_instances"],"matched_instances":instance_alignment["matched_instances"],"instance_transforms":instance_alignment["instance_transforms"],"instance_solution_method":instance_alignment["instance_solution_method"],"instance_solution_complete":instance_alignment["instance_solution_complete"],"instance_arrangements":instance_alignment.get("candidate_arrangements",[]),"instance_interface_selections":instance_interface_selections,
+      "transform":{"rotation_matrix":[[int(v) for v in rr] for rr in primary_m],"translation_mm":[round(x,3) for x in primary_t]},
+      "metrics":{**met,"score_gap":round(gap,3),"orientation_affinity":best[4],"distinct_solution_count":len(distinct),"instance_arrangement":{"reason":instance_alignment.get("reason"),"separation_proof":instance_alignment.get("separation_proof"),"uniqueness_basis":instance_alignment.get("uniqueness_basis"),"candidate_arrangement_search_complete":instance_alignment.get("candidate_arrangement_search_complete"),"search_nodes":instance_alignment.get("search_nodes"),"supported_pose_count":instance_alignment.get("supported_pose_count"),"minimum_instance_gap_mm":instance_alignment.get("minimum_instance_gap_mm"),"clearance_pair_proofs":instance_alignment.get("clearance_pair_proofs",[]),"exact_pair_checks":instance_alignment.get("exact_pair_checks"),"score_gap":instance_alignment.get("arrangement_score_gap")},"checks":{"contact_support":contact_ok,"low_intrusion":intrusion_ok,"contact_span":span_ok,"single_pose_solution_unique":pose_uniqueness_ok,"solution_unique":uniqueness_ok,"instance_arrangement_complete":instance_alignment.get("instance_solution_complete",False)},"solutions":solution_rows},
+      "interface_selection":{"axis":"XYZ"[axis_i],"plane_mm":round(plane,3),"raw_source_plane_mm":round(raw_plane,3),"band_mm":round(band,3),"span_mm":round(max(cd),3),"confidence":confidence,"reason":"counterpart_geometry_contact_alignment_v1","coordinate_frame":"source_assembly_min_normalized"},
       "policy":"Fail closed unless measured counterpart geometry produces a low-intrusion, spatially distributed and sufficiently unique contact solution."
     }
 
@@ -4401,7 +4621,7 @@ def _u_cad_evidence_binding_selftest():
     return {"status":"PASS" if all(checks.values()) else "FAIL","checks":checks,"bindings":binding_rows,"removed_volume_mm3":round(removed,3),"expected_removed_volume_mm3":round(expected,3)}
 
 class Handler(BaseHTTPRequestHandler):
-    server_version="MakerSenceCAD/2.64.0-counterpart-exact-alignment"
+    server_version="MakerSenceCAD/2.64.13-projection-separation-v4-runner-relay"
     def log_message(self,fmt,*args):print(fmt%args,flush=True)
     def send_json(self,code,obj):
         data=json.dumps(obj,ensure_ascii=False).encode("utf-8")
@@ -4417,7 +4637,13 @@ class Handler(BaseHTTPRequestHandler):
         return True
     def do_GET(self):
         path=urlparse(self.path).path
-        if path=="/health":return self.send_json(200,{"ok":True,"service":"makersence-cad-worker","version":"2.64.0-counterpart-exact-alignment","engine":"cadquery+blender+svgpathtools+shapely+pillow","blender":{"available":pathlib.Path(BLENDER_BIN).exists(),"binary":BLENDER_BIN},"bambu_slicer":{"available":bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),"engine":"Bambu Studio","version":BAMBU_VERSION},"design_model_provider":design_model_provider_status(),"capabilities":["compact_step_brep","bambu_native_parts","detachable_parts","assembly_render","product_dimensions","open_edges_zero_gate","formal_mesh_render","artifact_reaudit","rectangular_blind_pockets","geometry_intent_gate","orphan_geometry_gate","unintended_through_cut_gate","welded_3mf_meshes","exported_3mf_topology_gate","true_font_outline_text","high_smooth_vector_mesh","multilingual_font_fallback","actual_text_stroke_gate","adaptive_cjk_regular_first","cjk_internal_clearance_gate","cjk_counter_preservation_gate","text_mesh_topology_candidate_gate","remote_3mf_stream_analyzer","remote_3mf_xml_iterparse","remote_3mf_transform_aware_bounds","remote_3mf_cad_drawing_v1","remote_3mf_reconstruction_sections_v2","auto_hole_slot_detection","blind_cavity_detection_v1","planar_face_cluster_locator_v1","cavity_bottom_face_match_v1","residual_wall_normal_distance_v1","paired_plane_thickness_v1","bounded_per_part_feature_scan_v1","auto_fillet_chamfer_candidates","auto_section_view_plan","multipart_dimension_semantics","supplementary_stl_step_analyzer","remote_source_url_analyzer_v1","counterpart_alignment_v1","counterpart_exact_surface_distance_v1","generic_memory_budget_v1","streaming_3mf_glb_export","source_3mf_glb_preview_v1","world_space_feature_center_v1","auto_text_boldening","typography_layout_bounds","script_aware_glyph_spacing","glyph_clearance_gate","text_readability_gate","bambu_04_text_profile","text_slicer_no_merge_gate","separate_structural_text_min_feature","arachne_text_project_settings","bambu_cli_real_slice","gcode_3mf_toolpath_gate","print_ready_plate_3mf","plate_part_coverage_gate","universal_cad_recipe_v2","cad_evidence_parametric_binding_v1","blind_cavity_recipe_cut_v1","planar_design_fidelity_artifact_gate_v1","universal_design_fidelity_artifact_gate_v1","section_loft_reconstruction_v1","section_loft_open_cavity_v2","multipart_relation_rebuild_v1","per_part_reconstruction_evidence_v1","planar_multiloop_extrusion_v1","planar_mesh_projection_fallback_v1","bambu_assembly_metadata_evidence_v1","assembly_pose_solver_v1","assembly_pose_solver_v3","mechanism_pose_brep_probe_v1","mechanism_motion_solver_v1","mechanism_motion_solver_v2","mechanism_motion_solver_v3","hinge_sweep_collision_gate_v1","terminal_stop_refinement_v1","latch_relative_pivot_engagement_v1","motion_bbox_prefilter_v1","motion_memory_checkpoint_v1","motion_exact_separation_prefilter_v1","motion_fail_closed_collision_v1","motion_early_direction_exit_v1","motion_isolated_subprocess_v1","motion_timeout_guard_v1","async_motion_jobs_v1","separate_part_mate_resolver_v1","planar_ring_opening_match_v1","faceted_mesh_brep_v1","complex_topology_mesh_fallback_v1","sealed_internal_cavity_mesh_fallback_v1","multipart_dimension_semantics_v2","source_intended_contact_qa_v1","same_root_assembly_guard_v1","axisymmetric_revolve_reconstruction_v1","bounded_inprocess_universal_jobs_v1","planar_prismatic_reconstruction_v1","commercial_visual_release_gate_v1","fail_closed_family_router_v1","svg_profile_extrusion_v1","formal_geometry_only_render_v1","text_08mm_baseline_v1","generic_blender_profile_executor_v1","generic_blender_to_cad_brep_v1","design_model_provider_router_v1","modal_triposg_provider_v1",],"profiles":["bambu_a1_mini_04"],"universal_executor_probe":{"cavity_loft_policy":UNIVERSAL_CAVITY_LOFT_POLICY,"loft_argcount":_u_loft_from_loops.__code__.co_argcount}})
+        if path.startswith("/v1/github-runner/tasks/"):
+            if not self.authorized():return
+            task_id=path.rsplit("/",1)[-1]
+            task=get_task(task_id)
+            if task is None:return self.send_json(404,{"error":"RUNNER_TASK_NOT_FOUND"})
+            return self.send_json(200,task)
+        if path=="/health":return self.send_json(200,{"ok":True,"service":"makersence-cad-worker","version":"2.64.13-projection-separation-v4-runner-relay","engine":"cadquery+blender+svgpathtools+shapely+pillow","blender":{"available":pathlib.Path(BLENDER_BIN).exists(),"binary":BLENDER_BIN},"bambu_slicer":{"available":bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),"engine":"Bambu Studio","version":BAMBU_VERSION},"design_model_provider":design_model_provider_status(),"capabilities":["compact_step_brep","bambu_native_parts","detachable_parts","assembly_render","product_dimensions","open_edges_zero_gate","formal_mesh_render","artifact_reaudit","rectangular_blind_pockets","geometry_intent_gate","orphan_geometry_gate","unintended_through_cut_gate","welded_3mf_meshes","exported_3mf_topology_gate","true_font_outline_text","high_smooth_vector_mesh","multilingual_font_fallback","actual_text_stroke_gate","adaptive_cjk_regular_first","cjk_internal_clearance_gate","cjk_counter_preservation_gate","text_mesh_topology_candidate_gate","remote_3mf_stream_analyzer","remote_3mf_xml_iterparse","remote_3mf_transform_aware_bounds","remote_3mf_cad_drawing_v1","remote_3mf_reconstruction_sections_v2","auto_hole_slot_detection","blind_cavity_detection_v1","planar_face_cluster_locator_v1","cavity_bottom_face_match_v1","residual_wall_normal_distance_v1","paired_plane_thickness_v1","bounded_per_part_feature_scan_v1","auto_fillet_chamfer_candidates","auto_section_view_plan","multipart_dimension_semantics","supplementary_stl_step_analyzer","remote_source_url_analyzer_v1","counterpart_alignment_v1","transform_aware_3mf_build_graph_alignment_v1","counterpart_reference_mesh_evidence_v1","counterpart_multi_instance_arrangement_v1","counterpart_alignment_async_jobs_v1","counterpart_exact_surface_distance_v1","counterpart_exact_mesh_gap_v1","counterpart_projected_separation_lower_bound_v1","generic_memory_budget_v1","streaming_3mf_glb_export","source_3mf_glb_preview_v1","world_space_feature_center_v1","auto_text_boldening","typography_layout_bounds","script_aware_glyph_spacing","glyph_clearance_gate","text_readability_gate","bambu_04_text_profile","text_slicer_no_merge_gate","separate_structural_text_min_feature","arachne_text_project_settings","bambu_cli_real_slice","gcode_3mf_toolpath_gate","print_ready_plate_3mf","plate_part_coverage_gate","universal_cad_recipe_v2","cad_evidence_parametric_binding_v1","blind_cavity_recipe_cut_v1","planar_design_fidelity_artifact_gate_v1","universal_design_fidelity_artifact_gate_v1","section_loft_reconstruction_v1","section_loft_open_cavity_v2","multipart_relation_rebuild_v1","per_part_reconstruction_evidence_v1","planar_multiloop_extrusion_v1","planar_mesh_projection_fallback_v1","bambu_assembly_metadata_evidence_v1","assembly_pose_solver_v1","assembly_pose_solver_v3","mechanism_pose_brep_probe_v1","mechanism_motion_solver_v1","mechanism_motion_solver_v2","mechanism_motion_solver_v3","hinge_sweep_collision_gate_v1","terminal_stop_refinement_v1","latch_relative_pivot_engagement_v1","motion_bbox_prefilter_v1","motion_memory_checkpoint_v1","motion_exact_separation_prefilter_v1","motion_fail_closed_collision_v1","motion_early_direction_exit_v1","motion_isolated_subprocess_v1","motion_timeout_guard_v1","async_motion_jobs_v1","separate_part_mate_resolver_v1","planar_ring_opening_match_v1","faceted_mesh_brep_v1","complex_topology_mesh_fallback_v1","sealed_internal_cavity_mesh_fallback_v1","multipart_dimension_semantics_v2","source_intended_contact_qa_v1","same_root_assembly_guard_v1","axisymmetric_revolve_reconstruction_v1","bounded_inprocess_universal_jobs_v1","planar_prismatic_reconstruction_v1","commercial_visual_release_gate_v1","fail_closed_family_router_v1","svg_profile_extrusion_v1","formal_geometry_only_render_v1","text_08mm_baseline_v1","generic_blender_profile_executor_v1","generic_blender_to_cad_brep_v1","design_model_provider_router_v1","modal_triposg_provider_v1","github_actions_geometry_runner_oidc_v1",],"profiles":["bambu_a1_mini_04"],"universal_executor_probe":{"cavity_loft_policy":UNIVERSAL_CAVITY_LOFT_POLICY,"loft_argcount":_u_loft_from_loops.__code__.co_argcount}})
         if path=="/v1/selftest/face-evidence":
             if not self.authorized():return
             return self.send_json(200,_dw_face_evidence_selftest())
@@ -4428,6 +4654,10 @@ class Handler(BaseHTTPRequestHandler):
             if not self.authorized():return
             jid=path.split("/")[-1];j=JOBS.get(jid)
             return self.send_json(200,{"job_id":jid,**j}) if j else self.send_json(404,{"error":"job not found"})
+        if path.startswith("/v1/counterpart-alignment-jobs/"):
+            if not self.authorized():return
+            jid=path.split("/")[-1];j=ALIGNMENT_JOBS.get(jid)
+            return self.send_json(200,{"job_id":jid,**j}) if j else self.send_json(404,{"error":"counterpart alignment job not found"})
         if path.startswith("/v1/motion-jobs/"):
             if not self.authorized():return
             jid=path.split("/")[-1];j=MOTION_JOBS.get(jid)
@@ -4459,9 +4689,29 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(404,{"error":"not found"})
     def do_POST(self):
         path=urlparse(self.path).path
+        if path in ("/v1/github-runner/claim","/v1/github-runner/result"):
+            try:
+                n=int(self.headers.get("Content-Length","0"))
+                if n<=0 or n>850_000:return self.send_json(400,{"error":"invalid runner request size"})
+                payload=json.loads(self.rfile.read(n).decode("utf-8"))
+                result=claim_task(self.headers,payload) if path.endswith("/claim") else complete_task(self.headers,payload)
+                return self.send_json(200,result)
+            except RelayError as ex:
+                return self.send_json(ex.status,{"error":ex.code})
+            except Exception:
+                print("github runner relay request failed",path,flush=True)
+                return self.send_json(500,{"error":"runner relay request failed"})
         if not self.authorized():return
         try:
             n=int(self.headers.get("Content-Length","0"))
+            if path=="/v1/github-runner/tasks":
+                if n<=0 or n>300_000:return self.send_json(400,{"error":"invalid runner task request"})
+                try:
+                    payload=json.loads(self.rfile.read(n).decode("utf-8"))
+                    result=enqueue_task(payload.get("task_id"),payload.get("request"))
+                except RelayError as ex:
+                    return self.send_json(ex.status,{"error":ex.code})
+                return self.send_json(202,result)
             if path=="/v1/analyze-source-file":
                 if n<=0 or n>50_000_000:return self.send_json(400,{"error":"invalid source file size"})
                 fmt=parse_qs(urlparse(self.path).query).get("format",[""])[0]
@@ -4477,10 +4727,28 @@ class Handler(BaseHTTPRequestHandler):
                 req=json.loads(self.rfile.read(n).decode("utf-8"))
                 out=analyze_remote_source_url(req.get("url"),req.get("format") or "",req.get("filename") or "counterpart-source")
                 return self.send_json(200,out)
+            if path=="/v1/submit-counterpart-alignment":
+                if n<=0 or n>300_000:return self.send_json(400,{"error":"invalid counterpart alignment request"})
+                req=json.loads(self.rfile.read(n).decode("utf-8"))
+                if not isinstance(req.get("source_url"),str) or not req["source_url"].startswith("https://"):return self.send_json(400,{"error":"source_url must be https"})
+                if not isinstance(req.get("counterpart_url"),str) or not req["counterpart_url"].startswith("https://"):return self.send_json(400,{"error":"counterpart_url must be https"})
+                expected=req.get("expected_instances",1)
+                if not isinstance(expected,int) or expected<1 or expected>12:return self.send_json(400,{"error":"expected_instances must be an integer from 1 to 12"})
+                source_part_ids=req.get("source_part_ids")
+                if source_part_ids is not None:
+                    if not isinstance(source_part_ids,list) or not 1<=len(source_part_ids)<=32 or any(not isinstance(x,str) or not x.strip() or len(x)>128 for x in source_part_ids):
+                        return self.send_json(400,{"error":"source_part_ids must contain 1 to 32 non-empty strings"})
+                    req["source_part_ids"]=sorted({x.strip() for x in source_part_ids})
+                return self.send_json(202,_submit_counterpart_alignment_job(req))
             if path=="/v1/align-counterpart":
                 if n<=0 or n>300_000:return self.send_json(400,{"error":"invalid counterpart alignment request"})
                 req=json.loads(self.rfile.read(n).decode("utf-8"))
-                out=align_counterpart_urls(req.get("source_url"),req.get("counterpart_url"),req.get("relation") or "support")
+                source_part_ids=req.get("source_part_ids")
+                if source_part_ids is not None:
+                    if not isinstance(source_part_ids,list) or not 1<=len(source_part_ids)<=32 or any(not isinstance(x,str) or not x.strip() or len(x)>128 for x in source_part_ids):
+                        return self.send_json(400,{"error":"source_part_ids must contain 1 to 32 non-empty strings"})
+                    source_part_ids=sorted({x.strip() for x in source_part_ids})
+                out=align_counterpart_urls(req.get("source_url"),req.get("counterpart_url"),req.get("relation") or "support",req.get("expected_instances",1),req.get("counterpart_context"),source_part_ids)
                 return self.send_json(200,out)
             if path=="/v1/resolve-mechanism-pose":
                 if n<=0 or n>2_000_000:return self.send_json(400,{"error":"invalid mechanism pose request"})
@@ -4554,13 +4822,6 @@ def _startup_hybrid_smoke():
         needed={"model.stl","model.step","model.3mf","preview.glb"}
         provider_ev=(validation.get("blender_hybrid") or {})
         export_audit=validation.get("export_audit") or {}
-        smoke_ok=bool(
-          j.get("status")=="completed"
-          and needed.issubset(set(artifacts))
-          and validation.get("blender_hybrid_ok") is True
-          and str(provider_ev.get("mesh_brep_status") or "").lower()=="ready"
-          and export_audit.get("ok") is True
-        )
         failed_validation_gates=[]
         for key,value in validation.items():
             if value is False:
@@ -4574,6 +4835,15 @@ def _startup_hybrid_smoke():
                         if check_value is False:
                             failed_validation_gates.append(str(key)+"."+str(check_key))
         failed_validation_gates=sorted(set(failed_validation_gates))
+        smoke_ok=bool(
+          j.get("status")=="completed"
+          and needed.issubset(set(artifacts))
+          and validation.get("status")=="PASS"
+          and validation.get("blender_hybrid_ok") is True
+          and str(provider_ev.get("mesh_brep_status") or "").lower()=="ready"
+          and export_audit.get("ok") is True
+          and not failed_validation_gates
+        )
         result={
           "status":"PASS" if smoke_ok else "FAIL",
           "job_status":j.get("status"),
@@ -4601,9 +4871,11 @@ def _startup_hybrid_smoke():
 if __name__=="__main__":
     if len(sys.argv)>=4 and sys.argv[1]=="--generate-child":
         raise SystemExit(_generate_child_cli(sys.argv[2],sys.argv[3]))
+    if len(sys.argv)>=4 and sys.argv[1]=="--counterpart-alignment-child":
+        raise SystemExit(_counterpart_alignment_child_cli(sys.argv[2],sys.argv[3]))
     if len(sys.argv)>=4 and sys.argv[1]=="--motion-child":
         raise SystemExit(_motion_child_cli(sys.argv[2],sys.argv[3]))
-    print("MakerSence CAD Worker 2.61.0-design-model-router starting on",PORT,"Bambu Studio",BAMBU_VERSION,"available",bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),flush=True)
+    print("MakerSence CAD Worker 2.64.13-projection-separation-v4-runner-relay starting on",PORT,"Bambu Studio",BAMBU_VERSION,"available",bool(BAMBU_BIN and pathlib.Path(BAMBU_BIN).exists()),flush=True)
     if str(os.environ.get("MAKERSENCE_HYBRID_SMOKE_ON_START","")).strip()=="1":
         threading.Thread(target=_startup_hybrid_smoke,daemon=True,name="makersence-hybrid-smoke").start()
     ThreadingHTTPServer(("0.0.0.0",PORT),Handler).serve_forever()
