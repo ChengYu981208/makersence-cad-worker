@@ -162,7 +162,11 @@ def _exact_mesh_clearance(a: Any, b: Any, state: dict[str, Any], required_gap: f
         # Both solids are rigid transforms of the same source mesh. A positive
         # exact surface distance therefore proves they neither touch nor overlap;
         # avoid allocating a full boolean-intersection mesh for this proof.
-        search_length = max(0.01, state["diagonal"] * 2.0 + required_gap + 0.01)
+        # We only need a conservative lower bound that proves the required
+        # clearance. MinGap returns a value in [0, search_length], so searching
+        # beyond the manufacturing gap adds no evidence and needlessly explores
+        # distant triangle pairs on dense imported meshes.
+        search_length = min(25.0, max(0.01, required_gap + 0.01))
         clearance = float(a.min_gap(b, search_length))
         if not math.isfinite(clearance) or clearance <= 1e-7 or clearance + 1e-4 < required_gap:
             return None
@@ -172,6 +176,7 @@ def _exact_mesh_clearance(a: Any, b: Any, state: dict[str, Any], required_gap: f
             "clearance_lower_bound_mm": conservative_clearance,
             "overlap_volume_mm3": 0.0,
             "required_gap_mm": round(required_gap, 6),
+            "search_length_mm": round(search_length, 6),
             "separation_basis": "POSITIVE_BOUNDARY_GAP_FOR_CONGRUENT_RIGID_INSTANCES",
             "status": "PASS",
         }
