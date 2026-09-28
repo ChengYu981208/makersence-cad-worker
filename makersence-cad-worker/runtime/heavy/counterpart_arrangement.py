@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections import OrderedDict
 from typing import Any
 
 
@@ -165,11 +166,11 @@ def solve_instance_arrangement(
     source_mesh: dict[str, Any] | None = None,
     max_exact_pair_checks: int = 500,
 ) -> dict[str, Any]:
-    """Select a unique, supported set of mutually separated instance poses.
+    """Select supported poses with bounded, auditable pairwise clearance proofs.
 
-    This deliberately uses non-overlapping AABBs as the proof of inter-instance
-    separation. It therefore rejects some safe mesh arrangements but never
-    treats overlapping bounds as proof of a collision-free arrangement.
+    AABB lower bounds avoid exact mesh work when they prove the required gap.
+    Overlapping bounds require exact mesh clearance; incomplete or exhausted
+    searches fail closed. Cached posed meshes are capped by triangle budget.
     """
     try:
         expected = int(expected_instances)
@@ -236,21 +237,30 @@ def solve_instance_arrangement(
     exhausted = False
     mesh_state: dict[str, Any] | None = None
     mesh_state_checked = False
-    transformed: dict[int, Any] = {}
+    source_triangle_count = len(source_mesh.get("triangles") or []) if isinstance(source_mesh, dict) else 0
+    transformed_cache_capacity = (
+        max(2, min(8, 600_000 // max(1, source_triangle_count)))
+        if source_mesh is not None else 0
+    )
+    transformed_cache_peak = 0
+    transformed: OrderedDict[int, Any] = OrderedDict()
     pair_cache: dict[tuple[int, int], dict[str, Any] | None] = {}
 
     def transformed_pose(index: int):
-        nonlocal mesh_state, mesh_state_checked
+        nonlocal mesh_state, mesh_state_checked, transformed_cache_peak
         if index in transformed:
+            transformed.move_to_end(index)
             return transformed[index]
         if not mesh_state_checked:
             mesh_state = _manifold_source(source_mesh)
             mesh_state_checked = True
-        if mesh_state is None:
-            transformed[index] = None
-        else:
-            transformed[index] = _pose_manifold(mesh_state, unique[index])
-        return transformed[index]
+        result = None if mesh_state is None else _pose_manifold(mesh_state, unique[index])
+        transformed[index] = result
+        transformed.move_to_end(index)
+        while len(transformed) > transformed_cache_capacity:
+            transformed.popitem(last=False)
+        transformed_cache_peak = max(transformed_cache_peak, len(transformed))
+        return result
 
     def pair_proof(left_index: int, right_index: int) -> dict[str, Any] | None:
         nonlocal exact_pair_checks, exhausted
@@ -374,6 +384,8 @@ def solve_instance_arrangement(
         "uniqueness_basis": "SEARCHED_CANDIDATE_POSES_ONLY",
         "search_nodes": nodes,
         "exact_pair_checks": exact_pair_checks,
+        "transformed_pose_cache_capacity": transformed_cache_capacity,
+        "transformed_pose_cache_peak": transformed_cache_peak,
         "supported_pose_count": len(unique),
         "minimum_instance_gap_mm": gap,
         "arrangement_score_gap": round(score_gap, 4) if score_gap is not None else None,
