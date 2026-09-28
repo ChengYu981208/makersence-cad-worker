@@ -1,0 +1,247 @@
+name: Encrypted precise geometry alignment
+
+on:
+  push:
+    branches:
+      - codex/github-runner-capacity-20260928
+    paths:
+      - "makersence-geometry-queue/*.json"
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: makersence-precise-geometry-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  align:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Identify the encrypted queue item
+        id: queue
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os, re, sys
+          event=json.load(open(os.environ["GITHUB_EVENT_PATH"],encoding="utf-8"))
+          changed=set()
+          for commit in event.get("commits") or []:
+              changed.update(commit.get("added") or [])
+              changed.update(commit.get("modified") or [])
+          if not changed and event.get("head_commit"):
+              changed.update(event["head_commit"].get("added") or [])
+              changed.update(event["head_commit"].get("modified") or [])
+          matches=sorted(p for p in changed if re.fullmatch(r"makersence-geometry-queue/[a-f0-9]{32}\.json",p))
+          if not matches:
+              with open(os.environ["GITHUB_OUTPUT"],"a",encoding="utf-8") as f:f.write("skip=true\n")
+              print("No new encrypted geometry task in this push.")
+              sys.exit(0)
+          if len(matches)!=1:
+              raise SystemExit("Expected one encrypted geometry task.")
+          path=matches[0]
+          try:
+              queue=json.load(open(path,encoding="utf-8"))
+              task=str(queue.get("task_id") or "")
+              issue=int(queue.get("issue_number") or 0)
+          except Exception:
+              raise SystemExit("Encrypted queue metadata is invalid.")
+          if not re.fullmatch(r"[a-f0-9]{32}",task) or path!="makersence-geometry-queue/"+task+".json" or issue<=0:
+              raise SystemExit("Encrypted queue metadata is invalid.")
+          with open(os.environ["GITHUB_OUTPUT"],"a",encoding="utf-8") as f:
+              f.write("skip=false\n")
+              f.write("path="+path+"\n")
+              f.write("task_id="+task+"\n")
+              f.write("issue_number="+str(issue)+"\n")
+          print("Accepted one opaque encrypted geometry task.")
+          PY
+
+      - name: Build the full-resolution geometry worker
+        if: steps.queue.outputs.skip != 'true'
+        run: docker build --pull -t makersence-precise-alignment makersence-cad-worker/runtime/heavy
+
+      - name: Start the isolated geometry worker
+        if: steps.queue.outputs.skip != 'true'
+        run: |
+          docker run -d --name makersence-precise-alignment \
+            -e WORKER_TOKEN=ephemeral-github-runner-token \
+            -e PORT=8000 \
+            -e MAKERSENCE_HEAVY_CONCURRENCY=1 \
+            -p 18000:8000 \
+            makersence-precise-alignment
+
+      - name: Wait for the worker health check
+        if: steps.queue.outputs.skip != 'true'
+        run: |
+          python - <<'PY'
+          import json,time,urllib.request
+          for _ in range(180):
+              try:
+                  with urllib.request.urlopen("http://127.0.0.1:18000/health",timeout=3) as r:
+                      health=json.load(r)
+                  if health.get("ok"):
+                      print("Geometry worker is ready; version "+str(health.get("version") or "unknown"))
+                      break
+              except Exception:
+                  time.sleep(1)
+          else:
+              raise SystemExit("Geometry worker health check timed out.")
+          PY
+
+      - name: Decrypt the task only inside the ephemeral runner
+        id: decrypt
+        if: steps.queue.outputs.skip != 'true'
+        env:
+          MAKERSENCE_GEOMETRY_RUNNER_KEY: ${{ secrets.MAKERSENCE_GEOMETRY_RUNNER_KEY }}
+          QUEUE_PATH: ${{ steps.queue.outputs.path }}
+          EXPECTED_TASK_ID: ${{ steps.queue.outputs.task_id }}
+          EXPECTED_ISSUE_NUMBER: ${{ steps.queue.outputs.issue_number }}
+        run: |
+          node <<'NODE'
+          const fs=require('fs');
+          const crypto=require('crypto');
+          function fail(){throw new Error('Encrypted task could not be opened.')}
+          const raw=String(process.env.MAKERSENCE_GEOMETRY_RUNNER_KEY||'').trim();
+          if(!raw)fail();
+          let key;
+          if(/^[0-9a-f]{64}$/i.test(raw))key=Buffer.from(raw,'hex');
+          else key=Buffer.from(raw,'base64');
+          if(key.length!==32)fail();
+          const queue=JSON.parse(fs.readFileSync(process.env.QUEUE_PATH,'utf8'));
+          if(queue.version!==1||queue.task_id!==process.env.EXPECTED_TASK_ID||Number(queue.issue_number)!==Number(process.env.EXPECTED_ISSUE_NUMBER))fail();
+          const envelope=queue.envelope||{};
+          if(envelope.v!==1||!envelope.iv||!envelope.ciphertext)fail();
+          const combined=Buffer.from(envelope.ciphertext,'base64');
+          if(combined.length<17)fail();
+          const decipher=crypto.createDecipheriv('aes-256-gcm',key,Buffer.from(envelope.iv,'base64'));
+          decipher.setAuthTag(combined.subarray(combined.length-16));
+          let clear;
+          try{clear=Buffer.concat([decipher.update(combined.subarray(0,combined.length-16)),decipher.final()])}catch{fail()}
+          const payload=JSON.parse(clear.toString('utf8'));
+          if(payload.task_id!==queue.task_id||Number(payload.issue_number)!==Number(queue.issue_number))fail();
+          const request=payload.request||{};
+          if(typeof request.source_url!=='string'||!request.source_url.startsWith('https://')||typeof request.counterpart_url!=='string'||!request.counterpart_url.startsWith('https://'))fail();
+          if(!Number.isInteger(request.expected_instances)||request.expected_instances<1||request.expected_instances>12)fail();
+          fs.writeFileSync('/tmp/makersence-alignment-request.json',JSON.stringify(request),{mode:0o600});
+          console.log('Encrypted task opened in memory; source URLs were not printed.');
+          NODE
+
+      - name: Run exact source and counterpart mesh alignment
+        id: align
+        if: steps.queue.outputs.skip != 'true'
+        run: |
+          python - <<'PY'
+          import json,time,urllib.request,urllib.error,os
+          base="http://127.0.0.1:18000"
+          token="ephemeral-github-runner-token"
+          try:
+              request=json.load(open("/tmp/makersence-alignment-request.json",encoding="utf-8"))
+              body=json.dumps(request,separators=(",",":")).encode("utf-8")
+              submit=urllib.request.Request(base+"/v1/submit-counterpart-alignment",data=body,headers={"Authorization":"Bearer "+token,"Content-Type":"application/json"},method="POST")
+              with urllib.request.urlopen(submit,timeout=30) as r: submitted=json.load(r)
+              job_id=str(submitted.get("job_id") or "")
+              if not job_id: raise RuntimeError("worker did not return a job id")
+              job=None
+              for _ in range(900):
+                  poll=urllib.request.Request(base+"/v1/counterpart-alignment-jobs/"+job_id,headers={"Authorization":"Bearer "+token})
+                  with urllib.request.urlopen(poll,timeout=20) as r: job=json.load(r)
+                  if job.get("status") in ("completed","failed"): break
+                  time.sleep(2)
+              if not job or job.get("status")!="completed": raise RuntimeError("geometry alignment did not complete")
+              alignment=job.get("result")
+              if not isinstance(alignment,dict): raise RuntimeError("geometry alignment result is missing")
+              if alignment.get("algorithm_version")!="counterpart-alignment-v4-exact-mesh-gap-bounded": raise RuntimeError("geometry algorithm version mismatch")
+              triangles=int((alignment.get("source") or {}).get("triangle_count") or 0)
+              if triangles<=0: raise RuntimeError("full-resolution source mesh evidence is missing")
+              if alignment.get("status") not in ("ALIGNED","REVIEW_REQUIRED"): raise RuntimeError("geometry alignment status is invalid")
+              raw=json.dumps(alignment,separators=(",",":"),ensure_ascii=False).encode("utf-8")
+              if len(raw)>800000: raise RuntimeError("geometry evidence exceeds the encrypted result limit")
+              with open("/tmp/makersence-alignment-result.json","wb") as f:f.write(raw)
+              print(json.dumps({"status":"PASS","algorithm_version":alignment.get("algorithm_version"),"geometry_status":alignment.get("status"),"source_triangle_count":triangles,"result_bytes":len(raw)}))
+          except Exception:
+              raise SystemExit("Full-resolution geometry alignment failed; raw worker details were withheld.")
+          PY
+
+      - name: Publish encrypted result or a generic failure code
+        if: always() && steps.queue.outputs.skip != 'true'
+        env:
+          MAKERSENCE_GEOMETRY_RUNNER_KEY: ${{ secrets.MAKERSENCE_GEOMETRY_RUNNER_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          QUEUE_PATH: ${{ steps.queue.outputs.path }}
+          TASK_ID: ${{ steps.queue.outputs.task_id }}
+          ISSUE_NUMBER: ${{ steps.queue.outputs.issue_number }}
+          DECRYPT_OUTCOME: ${{ steps.decrypt.outcome }}
+          ALIGNMENT_OUTCOME: ${{ steps.align.outcome }}
+          BRANCH_NAME: ${{ github.ref_name }}
+        run: |
+          node <<'NODE'
+          const fs=require('fs');
+          const crypto=require('crypto');
+          const repo=process.env.REPOSITORY;
+          const issue=Number(process.env.ISSUE_NUMBER);
+          const task=process.env.TASK_ID;
+          const token=process.env.GH_TOKEN;
+          async function comment(body){
+            const r=await fetch('https://api.github.com/repos/'+repo+'/issues/'+issue+'/comments',{
+              method:'POST',
+              headers:{'Authorization':'Bearer '+token,'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28','Content-Type':'application/json'},
+              body:JSON.stringify({body})
+            });
+            if(!r.ok)throw new Error('comment write failed');
+          }
+          async function removeQueue(){
+            try{
+              const url='https://api.github.com/repos/'+repo+'/contents/'+encodeURIComponent(process.env.QUEUE_PATH).replace(/%2F/g,'/')+'?ref='+encodeURIComponent(process.env.BRANCH_NAME);
+              const get=await fetch(url,{headers:{'Authorization':'Bearer '+token,'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'}});
+              if(!get.ok)return;
+              const file=await get.json();
+              const del=await fetch('https://api.github.com/repos/'+repo+'/contents/'+encodeURIComponent(process.env.QUEUE_PATH).replace(/%2F/g,'/'),{
+                method:'DELETE',
+                headers:{'Authorization':'Bearer '+token,'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28','Content-Type':'application/json'},
+                body:JSON.stringify({message:'Remove processed encrypted geometry task '+task,branch:process.env.BRANCH_NAME,sha:file.sha})
+              });
+              if(!del.ok)throw new Error('queue cleanup failed');
+            }catch{}
+          }
+          async function main(){
+            if(!token||!Number.isInteger(issue)||issue<=0||!/^[a-f0-9]{32}$/.test(task||''))throw new Error('task reference invalid');
+            if(process.env.DECRYPT_OUTCOME==='success'&&process.env.ALIGNMENT_OUTCOME==='success'){
+              const raw=fs.readFileSync('/tmp/makersence-alignment-result.json');
+              if(raw.length>800000)throw new Error('result too large');
+              const keyText=String(process.env.MAKERSENCE_GEOMETRY_RUNNER_KEY||'').trim();
+              const key=/^[0-9a-f]{64}$/i.test(keyText)?Buffer.from(keyText,'hex'):Buffer.from(keyText,'base64');
+              if(key.length!==32)throw new Error('runner key unavailable');
+              const payload={task_id:task,worker_status:'completed',alignment:JSON.parse(raw.toString('utf8'))};
+              const iv=crypto.randomBytes(12);
+              const cipher=crypto.createCipheriv('aes-256-gcm',key,iv);
+              const encrypted=Buffer.concat([cipher.update(Buffer.from(JSON.stringify(payload))),cipher.final(),cipher.getAuthTag()]);
+              const envelope=JSON.stringify({v:1,iv:iv.toString('base64'),ciphertext:encrypted.toString('base64')});
+              const encoded=Buffer.from(envelope,'utf8').toString('base64');
+              const size=36000,total=Math.ceil(encoded.length/size);
+              if(total<1||total>100)throw new Error('result chunk count invalid');
+              try{
+                for(let i=0;i<total;i++)await comment('MAKERSENCE_RESULT:'+task+':'+(i+1)+'/'+total+':'+encoded.slice(i*size,(i+1)*size));
+                console.log('Published encrypted geometry evidence in '+total+' chunks.');
+              }catch{
+                await comment('MAKERSENCE_FAILURE:'+task+':RESULT_PUBLISH_FAILED');
+                throw new Error('encrypted result publish failed');
+              }
+            }else{
+              await comment('MAKERSENCE_FAILURE:'+task+':WORKER_FAILED');
+              console.log('Published a generic encrypted-runner failure code.');
+            }
+            await removeQueue();
+          }
+          main().catch(()=>{console.error('Encrypted geometry result handoff failed.');process.exitCode=1});
+          NODE
+
+      - name: Remove temporary geometry data
+        if: always()
+        run: |
+          docker rm -f makersence-precise-alignment >/dev/null 2>&1 || true
+          rm -f /tmp/makersence-alignment-request.json /tmp/makersence-alignment-result.json
