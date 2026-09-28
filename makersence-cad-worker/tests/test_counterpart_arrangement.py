@@ -175,6 +175,28 @@ class InstanceArrangementTests(unittest.TestCase):
         self.assertEqual(result["transformed_pose_cache_peak"], 8)
         self.assertGreater(pose_builder.call_count, result["transformed_pose_cache_capacity"])
 
+    def test_compact_numpy_mesh_runs_exact_clearance_and_reports_stages(self):
+        import numpy as np
+
+        source_mesh = tetra_mesh()
+        source_mesh["vertices"] = np.asarray(source_mesh["vertices"], dtype=np.float32)
+        source_mesh["triangles"] = np.asarray(source_mesh["triangles"], dtype=np.uint32)
+        stages = []
+        result = solve_instance_arrangement(
+            [mesh_candidate([0, 0, 0], 100), mesh_candidate([6, 6, 0], 99)],
+            2,
+            source_dimensions_mm=[10, 10, 10],
+            minimum_contact_count=14,
+            minimum_gap_mm=0.5,
+            source_mesh=source_mesh,
+            stage_callback=stages.append,
+        )
+
+        self.assertEqual(result["status"], "ALIGNED")
+        self.assertLess(stages.index("manifold_source_start"), stages.index("manifold_source_ready"))
+        self.assertIn("exact_pair_clearance_start", stages)
+        self.assertIn("exact_pair_clearance_complete", stages)
+
     def test_invalid_rigid_transform_is_rejected(self):
         scale = [[2, 0, 0], [0, 1, 0], [0, 0, 1]]
         result = self.solve([candidate(0, 10, rotation=scale), candidate(20, 30)])
