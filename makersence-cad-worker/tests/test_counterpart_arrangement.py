@@ -76,6 +76,7 @@ class InstanceArrangementTests(unittest.TestCase):
         proof = result["clearance_pair_proofs"][0]
         self.assertEqual(proof["method"], "MANIFOLD3D_EXACT_MESH_GAP")
         self.assertGreaterEqual(proof["clearance_lower_bound_mm"], 0.5)
+        self.assertLessEqual(proof["search_length_mm"], 0.51)
         self.assertEqual(proof["overlap_volume_mm3"], 0.0)
 
     def test_clearance_pair_indices_follow_selected_instance_order(self):
