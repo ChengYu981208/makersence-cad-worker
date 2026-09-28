@@ -94,7 +94,7 @@ jobs:
             const contentType = String(response.headers.get('content-type') || '').toLowerCase();
             if (!contentType.includes('application/json')) {
               if (![200, 301, 302, 401, 403].includes(response.status)) throw new Error('GATEWAY_RESPONSE_NOT_JSON');
-              fs.appendFileSync(process.env.GITHUB_OUTPUT, 'claimed=false\\n');
+              fs.appendFileSync(process.env.GITHUB_OUTPUT, 'claimed=false\n');
               console.log('Gateway is not publicly reachable yet; no task was claimed.');
               return;
             }
