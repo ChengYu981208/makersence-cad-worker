@@ -230,6 +230,19 @@ class ProductGeometryContractTests(unittest.TestCase):
         self.assertIn("DEVICE_ENVELOPE_INSTANCE_ARRANGEMENT_INCOMPLETE", blockers)
         self.assertIn("DEVICE_ENVELOPE_ALIGNMENT_UNRESOLVED", blockers)
 
+        legacy_contract = ready_multi_device_envelope_contract()
+        legacy_arrangement = legacy_contract["product_geometry_contract"]["interface_reference"]["alignment"]["instance_arrangement"]
+        legacy_arrangement.pop("clearance_pair_proofs")
+        self.assertEqual(interface_preserving_contract_issues(legacy_contract), [])
+
+        exact_without_pair_proof = ready_multi_device_envelope_contract()
+        exact_alignment = exact_without_pair_proof["product_geometry_contract"]["interface_reference"]["alignment"]
+        exact_alignment["instance_solution_method"] = "BOUNDED_MANIFOLD3D_MESH_GAP_ARRANGEMENT_V1"
+        exact_alignment["instance_arrangement"]["separation_proof"] = "AABB_AND_MANIFOLD3D_EXACT_GAP"
+        exact_alignment["instance_arrangement"].pop("clearance_pair_proofs")
+        blockers = interface_preserving_contract_issues(exact_without_pair_proof)
+        self.assertIn("DEVICE_ENVELOPE_INSTANCE_ARRANGEMENT_INCOMPLETE", blockers)
+
         contract = ready_multi_device_envelope_contract()
         contract["product_geometry_contract"]["interface_reference"]["alignment"]["instance_solution_complete"] = False
         blockers = interface_preserving_contract_issues(contract)
