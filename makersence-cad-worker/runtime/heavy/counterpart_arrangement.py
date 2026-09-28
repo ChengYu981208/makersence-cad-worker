@@ -287,7 +287,17 @@ def solve_instance_arrangement(
         return proof
 
     def record(indices: tuple[int, ...], score: float, proofs: list[dict[str, Any]]) -> None:
-        arrangements.append((score / expected, indices, proofs))
+        instance_position = {candidate_index: position for position, candidate_index in enumerate(indices)}
+        normalized_proofs = []
+        for proof in proofs:
+            left = instance_position[proof["first_candidate_index"]]
+            right = instance_position[proof["second_candidate_index"]]
+            normalized = {key: value for key, value in proof.items()
+                          if key not in {"first_candidate_index", "second_candidate_index"}}
+            normalized["first_instance_index"] = min(left, right)
+            normalized["second_instance_index"] = max(left, right)
+            normalized_proofs.append(normalized)
+        arrangements.append((score / expected, indices, normalized_proofs))
         arrangements.sort(key=lambda x: x[0], reverse=True)
         del arrangements[4:]
 
@@ -316,8 +326,8 @@ def solve_instance_arrangement(
                     break
                 current_proofs.append({
                     **proof,
-                    "first_instance_index": min(index, prior),
-                    "second_instance_index": max(index, prior),
+                    "first_candidate_index": min(index, prior),
+                    "second_candidate_index": max(index, prior),
                 })
             if separated:
                 visit(index + 1, chosen + (index,), score + candidate["score"], current_proofs)
