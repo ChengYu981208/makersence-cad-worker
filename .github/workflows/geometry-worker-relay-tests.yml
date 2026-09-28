@@ -29,6 +29,9 @@ jobs:
       - name: Compile Heavy Worker modules
         working-directory: makersence-cad-worker/runtime/heavy
         run: python -m py_compile app.py product_geometry_contract.py github_runner_relay.py
+      - name: Build the Heavy Worker container
+        working-directory: makersence-cad-worker/runtime/heavy
+        run: docker build --pull -t makersence-heavy-relay-test .
       - name: Test OIDC verification and task lifecycle
         working-directory: makersence-cad-worker/runtime/heavy
         run: python -m unittest -v test_github_runner_relay.py
