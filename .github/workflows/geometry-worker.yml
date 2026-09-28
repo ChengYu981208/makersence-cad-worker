@@ -43,7 +43,7 @@ jobs:
           docker run --rm --entrypoint python makersence-heavy-geometry -c 'from pathlib import Path; p=Path("/app/app.py").read_text(); assert "--counterpart-alignment-child" in p and "counterpart-alignment-v4-exact-mesh-gap-bounded" in p and "alignment_result.json" in p; print("Pinned Heavy Worker alignment child is present.")'
 
   run-one-geometry-task:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
