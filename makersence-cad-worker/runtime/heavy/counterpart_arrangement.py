@@ -79,6 +79,112 @@ def _aabb_clearance_lower_bound(a: dict[str, Any], b: dict[str, Any]) -> float |
     return max(gaps) if gaps else None
 
 
+def _projection_clearance_lower_bound(
+    source_mesh: Any, left: dict[str, Any], right: dict[str, Any], required_gap: float
+) -> dict[str, Any] | None:
+    """Prove a conservative mesh gap from exact vertex projection intervals.
+
+    Every triangle lies inside the interval of its vertices on any unit axis.
+    A positive interval gap is therefore a lower bound on the Euclidean
+    distance between the complete transformed meshes. This is only a sufficient
+    proof; unresolved pairs still use the exact Manifold3D distance check.
+    """
+    if not isinstance(source_mesh, dict):
+        return None
+    raw_vertices = source_mesh.get("vertices")
+    if raw_vertices is None:
+        return None
+    try:
+        import numpy as np
+
+        vertices = np.asarray(raw_vertices, dtype=np.float64)
+        if vertices.ndim != 2 or vertices.shape[1] != 3 or len(vertices) < 4 or len(vertices) > 1_000_000:
+            return None
+        if not np.isfinite(vertices).all():
+            return None
+        left_rotation = np.asarray(left["rotation_matrix"], dtype=np.float64)
+        right_rotation = np.asarray(right["rotation_matrix"], dtype=np.float64)
+        left_translation = np.asarray(left["translation_mm"], dtype=np.float64)
+        right_translation = np.asarray(right["translation_mm"], dtype=np.float64)
+        if left_rotation.shape != (3, 3) or right_rotation.shape != (3, 3):
+            return None
+        if left_translation.shape != (3,) or right_translation.shape != (3,):
+            return None
+        if not np.isfinite(left_rotation).all() or not np.isfinite(right_rotation).all():
+            return None
+        if not np.isfinite(left_translation).all() or not np.isfinite(right_translation).all():
+            return None
+
+        axes = [
+            np.asarray(_center(right), dtype=np.float64) - np.asarray(_center(left), dtype=np.float64),
+            right_translation - left_translation,
+        ]
+        axes.extend(np.eye(3, dtype=np.float64))
+        axes.extend(left_rotation[:, index] for index in range(3))
+        axes.extend(right_rotation[:, index] for index in range(3))
+
+        coordinate_scale = max(
+            1.0,
+            float(np.max(np.abs(vertices))),
+            float(np.max(np.abs(left_translation))),
+            float(np.max(np.abs(right_translation))),
+        )
+        numeric_margin = max(1e-4, coordinate_scale * 1e-6)
+        seen_axes: list[Any] = []
+        for raw_axis in axes:
+            axis = np.asarray(raw_axis, dtype=np.float64)
+            norm = float(np.linalg.norm(axis))
+            if not math.isfinite(norm) or norm <= 1e-9:
+                continue
+            axis = axis / norm
+            if any(abs(float(np.dot(axis, prior))) >= 1.0 - 1e-9 for prior in seen_axes):
+                continue
+            seen_axes.append(axis)
+
+            left_local_axis = left_rotation.T @ axis
+            right_local_axis = right_rotation.T @ axis
+            left_projection = vertices @ left_local_axis
+            right_projection = vertices @ right_local_axis
+            left_offset = float(np.dot(left_translation, axis))
+            right_offset = float(np.dot(right_translation, axis))
+            left_low = float(left_projection.min()) + left_offset
+            left_high = float(left_projection.max()) + left_offset
+            right_low = float(right_projection.min()) + right_offset
+            right_high = float(right_projection.max()) + right_offset
+
+            if left_high < right_low:
+                raw_gap = right_low - left_high
+                separated_order = "first_before_second"
+            elif right_high < left_low:
+                raw_gap = left_low - right_high
+                separated_order = "second_before_first"
+            else:
+                continue
+            intervals = {"first_mm": [left_low, left_high], "second_mm": [right_low, right_high]}
+
+            lower_bound = raw_gap - numeric_margin
+            if not math.isfinite(lower_bound) or lower_bound <= 0:
+                continue
+            conservative_mm = math.floor(lower_bound * 1_000_000.0) / 1_000_000.0
+            if conservative_mm + 1e-7 < required_gap:
+                continue
+            return {
+                "method": "VERTEX_PROJECTION_SEPARATION_LOWER_BOUND",
+                "clearance_lower_bound_mm": conservative_mm,
+                "required_gap_mm": round(required_gap, 6),
+                "axis_world": [round(float(value), 9) for value in axis],
+                "projection_intervals_mm": {
+                    key: [round(float(value), 6) for value in values]
+                    for key, values in intervals.items()
+                },
+                "separated_order": separated_order,
+                "numerical_margin_mm": round(numeric_margin, 6),
+                "status": "PASS",
+            }
+    except Exception:
+        return None
+    return None
+
 def _manifold_source(mesh: Any) -> dict[str, Any] | None:
     if not isinstance(mesh, dict):
         return None
@@ -115,6 +221,10 @@ def _manifold_source(mesh: Any) -> dict[str, Any] | None:
         diagonal = float(np.linalg.norm(vp.max(axis=0) - vp.min(axis=0)))
         if not math.isfinite(diagonal) or diagonal <= 1e-9:
             return None
+        # Replace any nested Python lists with the exact contiguous arrays
+        # already used by Manifold3D; later projection checks need the vertices.
+        mesh["vertices"] = vp
+        mesh["triangles"] = tv
         return {"base": source, "module": m3d, "numpy": np, "volume": volume, "diagonal": diagonal}
     except Exception:
         return None
@@ -268,6 +378,7 @@ def solve_instance_arrangement(
     arrangements: list[tuple[float, tuple[int, ...], list[dict[str, Any]]]] = []
     nodes = 0
     exact_pair_checks = 0
+    projection_pair_checks = 0
     exhausted = False
     mesh_state: dict[str, Any] | None = None
     mesh_state_checked = False
@@ -294,7 +405,7 @@ def solve_instance_arrangement(
         return mesh_state
 
     def pair_proof(left_index: int, right_index: int) -> dict[str, Any] | None:
-        nonlocal exact_pair_checks, exhausted, transformed_cache_peak
+        nonlocal exact_pair_checks, projection_pair_checks, exhausted, transformed_cache_peak
         key = tuple(sorted((left_index, right_index)))
         if key in pair_cache:
             return pair_cache[key]
@@ -309,13 +420,22 @@ def solve_instance_arrangement(
             }
             pair_cache[key] = proof
             return proof
-        if source_mesh is None or exact_pair_checks >= max(1, int(max_exact_pair_checks)):
-            if source_mesh is not None:
-                exhausted = True
+        if source_mesh is None:
             pair_cache[key] = None
             return None
         state = ensure_mesh_state()
         if state is None:
+            pair_cache[key] = None
+            return None
+        projection_pair_checks += 1
+        report_stage("projection_separation_start")
+        projection_proof = _projection_clearance_lower_bound(source_mesh, left, right, gap)
+        report_stage("projection_separation_proven" if projection_proof is not None else "projection_separation_unresolved")
+        if projection_proof is not None:
+            pair_cache[key] = projection_proof
+            return projection_proof
+        if exact_pair_checks >= max(1, int(max_exact_pair_checks)):
+            exhausted = True
             pair_cache[key] = None
             return None
         relative = _relative_pose(left, right)
@@ -411,7 +531,10 @@ def solve_instance_arrangement(
         })
     selected = [unique[i] for i in best[1]] if unique_solution and best else []
     selected_proofs = best[2] if unique_solution and best else []
-    exact_used = any(row.get("method") == "MANIFOLD3D_EXACT_MESH_GAP" for row in selected_proofs)
+    geometric_gap_used = any(
+        row.get("method") in {"MANIFOLD3D_EXACT_MESH_GAP", "VERTEX_PROJECTION_SEPARATION_LOWER_BOUND"}
+        for row in selected_proofs
+    )
     return {
         "status": "ALIGNED" if unique_solution else "REVIEW_REQUIRED",
         "confidence": "HIGH" if unique_solution else "MEDIUM" if best and not exhausted else "LOW",
@@ -421,7 +544,7 @@ def solve_instance_arrangement(
         "arrangement_unique": unique_solution,
         "instance_solution_complete": unique_solution and len(selected) == expected,
         "instance_solution_method": (
-            "BOUNDED_MANIFOLD3D_MESH_GAP_ARRANGEMENT_V1" if exact_used
+            "BOUNDED_GEOMETRIC_SEPARATION_ARRANGEMENT_V1" if geometric_gap_used
             else "BOUNDED_NONOVERLAPPING_AABB_ARRANGEMENT_V1"
         ),
         "reason": reason,
@@ -429,6 +552,7 @@ def solve_instance_arrangement(
         "uniqueness_basis": "SEARCHED_CANDIDATE_POSES_ONLY",
         "search_nodes": nodes,
         "exact_pair_checks": exact_pair_checks,
+        "projection_pair_checks": projection_pair_checks,
         "transformed_pose_cache_capacity": transformed_cache_capacity,
         "transformed_pose_cache_peak": transformed_cache_peak,
         "supported_pose_count": len(unique),
@@ -438,7 +562,7 @@ def solve_instance_arrangement(
         "candidate_arrangements": alternatives,
         "clearance_pair_proofs": selected_proofs,
         "separation_proof": (
-            "AABB_AND_MANIFOLD3D_EXACT_GAP" if exact_used
+            "AABB_AND_GEOMETRIC_SEPARATION_LOWER_BOUNDS" if geometric_gap_used
             else "NONOVERLAPPING_AXIS_ALIGNED_BOUNDING_BOXES"
         ),
     }
