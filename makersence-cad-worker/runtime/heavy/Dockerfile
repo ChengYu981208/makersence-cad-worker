@@ -11,6 +11,7 @@ COPY design_model_router.py /app/design_model_router.py
 COPY product_geometry_contract.py /app/product_geometry_contract.py
 COPY counterpart_arrangement.py /app/counterpart_arrangement.py
 COPY counterpart_mesh.py /app/counterpart_mesh.py
+COPY github_runner_relay.py /app/github_runner_relay.py
 COPY app.py /app/app.py
 ENV BLENDER_BIN=/usr/bin/blender PORT=8000
 EXPOSE 8000
