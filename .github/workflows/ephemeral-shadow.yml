@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - consolidation/runtime-snapshots-20260925
+      - codex/github-runner-capacity-20260928
     paths:
       - "makersence-cad-worker/runtime/heavy/**"
       - "makersence-cad-worker/runtime/cad-core-v5/**"
@@ -30,7 +31,7 @@ jobs:
           - name: heavy
             context: makersence-cad-worker/runtime/heavy
             image: makersence-shadow-heavy
-            expected_version: 2.61.0-design-model-router
+            expected_version: 2.64.10-compact-exact-alignment-v4
             expect_multiview: "false"
             expect_generic_blender: "true"
           - name: cad-core-v5
