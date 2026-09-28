@@ -183,7 +183,9 @@ jobs:
               if alignment.get("status") not in ("ALIGNED","REVIEW_REQUIRED"): raise RuntimeError("geometry alignment status is invalid")
               raw=json.dumps(alignment,separators=(",",":"),ensure_ascii=False).encode("utf-8")
               if len(raw)>800000: raise RuntimeError("geometry evidence exceeds the result limit")
-              with open("/tmp/makersence-alignment-result.json","wb") as f: f.write(raw)
+              import os
+              fd=os.open("/tmp/makersence-alignment-result.json",os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600)
+              with os.fdopen(fd,"wb") as f: f.write(raw)
               print(json.dumps({"geometry_status":alignment.get("status"),"source_triangle_count":triangles,"result_bytes":len(raw)}))
           except Exception:
               raise SystemExit("Full-resolution geometry alignment failed; raw worker details were withheld.")
