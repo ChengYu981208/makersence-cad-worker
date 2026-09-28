@@ -221,7 +221,7 @@ jobs:
               const cipher=crypto.createCipheriv('aes-256-gcm',key,iv);
               const encrypted=Buffer.concat([cipher.update(Buffer.from(JSON.stringify(payload))),cipher.final(),cipher.getAuthTag()]);
               const envelope=JSON.stringify({v:1,iv:iv.toString('base64'),ciphertext:encrypted.toString('base64')});
-              const encoded=Buffer.from(envelope,'utf8').toString('base64');
+              const encoded=Buffer.from(envelope,'utf8').toString('base64url');
               const size=36000,total=Math.ceil(encoded.length/size);
               if(total<1||total>100)throw new Error('result chunk count invalid');
               try{
