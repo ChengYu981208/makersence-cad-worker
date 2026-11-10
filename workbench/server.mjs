@@ -14,7 +14,7 @@ const APP_DIR = path.dirname(fileURLToPath(import.meta.url));
 const HOME = os.homedir();
 const IS_WIN = process.platform === 'win32';
 const PORT = Number(process.env.MS_WB_PORT || 5888);
-const APP_VERSION = '2026.11.10c';
+const APP_VERSION = '2026.11.10d';
 const CLOUD = process.env.MS_WB_CLOUD === '1';
 // GitHub Codespaces：連接埠是「私人」的，只有登入你 GitHub 帳號的人才進得來，所以不用另外設密碼
 const CODESPACES = process.env.CODESPACES === 'true';
@@ -742,7 +742,8 @@ const server = http.createServer(async (req, res) => {
       if (safeEq(u.searchParams.get('k'), LOCAL_KEY)) { res.writeHead(302, { 'Set-Cookie': cookieFor(newSession('local')), Location: '/' }); return res.end(); }
     }
     const sess = getSession(req);
-    const authed = CODESPACES || !!sess || (!config.auth && loopHost);
+    // Codespaces：沒設密碼時靠 GitHub 私人連接埠擋人；設了密碼（例如連接埠改成公開）就要輸入密碼
+    const authed = (CODESPACES && !config.auth) || !!sess || (!config.auth && loopHost);
     const openPath = ['/login.html', '/icon.png', '/api/login', '/api/ping', '/api/authinfo'].includes(p);
     if (!authed && !openPath) {
       if (p.startsWith('/api/')) return send(res, 401, { error: '請先登入' });

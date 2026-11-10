@@ -7,6 +7,8 @@ for x in claude codex; do
   ln -sfn "$D/$x" "$HOME/.$x"
 done
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# 自動抓最新版工作台（Claude 修好的東西開機就會更新）
+git -C "$ROOT" pull --ff-only -q 2>/dev/null || true
 pkill -f "ms-workbench-loop" 2>/dev/null || true
 pkill -f "$ROOT/workbench/server.mjs" 2>/dev/null || true
 nohup setsid bash -c "exec -a ms-workbench-loop bash -c 'while true; do node \"$ROOT/workbench/server.mjs\" >> /tmp/workbench.log 2>&1; sleep 1; done'" >/dev/null 2>&1 &

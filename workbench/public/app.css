@@ -300,4 +300,3 @@ body:not(.cloud) .cloud-only { display: none !important; }
 .acct a.btnlink { display: inline-block; text-decoration: none; background: var(--accent); color: #fff; padding: 7px 12px; border-radius: 9px; font-size: 13px; font-weight: 600; }
 .project-row .icon-btn { font-size: 14px; }
 
-body.codespaces .pw-only, body.codespaces #logoutBtn { display: none !important; }
