@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>登入 · MAKERSENSE 工作台</title>
+<link rel="icon" href="icon.png">
+<style>
+  :root { --bg:#f6f5f2; --card:#fff; --line:#e3e0d9; --text:#1f1d1a; --muted:#8b867e; --accent:#1f6feb; --bad:#d1453b; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#161614; --card:#1f1e1c; --line:#33312d; --text:#ecebe8; --muted:#85817a; --accent:#5b9bff; } }
+  * { box-sizing: border-box; }
+  body { margin:0; min-height:100vh; display:grid; place-items:center; background:var(--bg); color:var(--text);
+    font-family:"Segoe UI","Microsoft JhengHei UI","PingFang TC","Noto Sans TC",system-ui,sans-serif; padding:20px; }
+  .card { width:min(380px,100%); background:var(--card); border:1px solid var(--line); border-radius:20px; padding:32px 28px 26px; box-shadow:0 10px 40px rgba(0,0,0,.08); text-align:center; }
+  img { width:64px; height:64px; border-radius:16px; }
+  h1 { font-size:20px; margin:14px 0 4px; letter-spacing:.04em; }
+  p { color:var(--muted); margin:0 0 22px; font-size:14px; }
+  input { width:100%; font:inherit; font-size:16px; padding:12px 14px; border-radius:12px; border:1px solid var(--line); background:var(--bg); color:var(--text); outline:none; }
+  input:focus { border-color:var(--accent); box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent); }
+  button { width:100%; margin-top:12px; font:inherit; font-size:15px; font-weight:600; padding:12px; border-radius:12px; border:0; background:var(--text); color:var(--card); cursor:pointer; }
+  button:disabled { opacity:.5; }
+  .err { color:var(--bad); font-size:13px; min-height:20px; margin-top:10px; }
+  small { color:var(--muted); display:block; margin-top:14px; line-height:1.6; }
+</style>
+</head>
+<body>
+<form class="card" id="f">
+  <img src="icon.png" alt="">
+  <h1>MAKERSENSE 工作台</h1>
+  <p>連到你家裡電腦上的工作台</p>
+  <input id="pw" type="password" placeholder="輸入工作台密碼" autocomplete="current-password" autofocus>
+  <button id="b">登入</button>
+  <div class="err" id="err"></div>
+  <small>登入後這台裝置會記住 30 天。<br>密碼在家裡電腦的「設定 → 遠端存取」設定。</small>
+</form>
+<script>
+const f = document.getElementById('f'), pw = document.getElementById('pw'), err = document.getElementById('err'), b = document.getElementById('b');
+fetch('/api/authinfo').then(r => r.json()).then(j => { if (j.authed) location.replace('/'); else if (!j.hasPassword) err.textContent = '還沒設定密碼：請先在家裡電腦的工作台「設定 → 遠端存取」設定。'; }).catch(() => {});
+f.onsubmit = async (e) => {
+  e.preventDefault(); err.textContent = ''; b.disabled = true;
+  try {
+    const r = await fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: pw.value }) });
+    const j = await r.json().catch(() => ({}));
+    if (r.ok) location.replace('/'); else { err.textContent = j.error || '登入失敗'; pw.select(); }
+  } catch { err.textContent = '連不到工作台：家裡的電腦可能關機或睡眠了'; }
+  b.disabled = false;
+};
+</script>
+</body>
+</html>

@@ -1,0 +1,23 @@
+{
+  "name": "MAKERSENSE 工作台",
+  "image": "mcr.microsoft.com/devcontainers/python:1-3.12-bookworm",
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": { "version": "22" }
+  },
+  "hostRequirements": { "cpus": 2 },
+  "containerEnv": {
+    "MS_WB_CLOUD": "1",
+    "MS_WB_ROOT": "/workspaces/.ms-data/MAKERSENSE",
+    "MS_WB_DATA": "/workspaces/.ms-data/workbench"
+  },
+  "postCreateCommand": "bash .devcontainer/setup.sh",
+  "postStartCommand": "bash .devcontainer/start.sh",
+  "forwardPorts": [5888],
+  "portsAttributes": {
+    "5888": { "label": "MAKERSENSE 工作台", "onAutoForward": "openBrowser" }
+  },
+  "customizations": {
+    "codespaces": { "openFiles": ["README.md"] },
+    "vscode": { "settings": { "workbench.startupEditor": "none", "locale": "zh-tw" } }
+  }
+}

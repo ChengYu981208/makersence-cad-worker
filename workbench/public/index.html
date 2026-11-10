@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MAKERSENSE 工作台</title>
+<link rel="icon" href="icon.png">
+<link rel="stylesheet" href="app.css">
+<script src="vendor/marked.js"></script>
+<script src="vendor/purify.js"></script>
+<script src="vendor/qrcode.js"></script>
+</head>
+<body>
+<div id="app">
+  <!-- 左側：產品與對話紀錄 -->
+  <aside id="sidebar">
+    <div class="brand">
+      <img src="icon.png" alt="" class="brand-logo">
+      <div class="brand-text"><b>MAKERSENSE</b><span>產品開發工作台</span></div>
+    </div>
+
+    <div class="side-section">
+      <div class="side-label">產品</div>
+      <div class="project-row">
+        <select id="projectSelect" title="選擇產品"></select>
+        <button class="icon-btn" id="newProjectBtn" title="開新產品">＋</button>
+        <button class="icon-btn" id="importBtn" title="匯入產品（上傳 zip，例如從 D:\FDM\Claude 打包的產品資料夾）">⇪</button>
+        <input type="file" id="importInput" accept=".zip" hidden>
+      </div>
+    </div>
+
+    <button class="primary wide" id="newThreadBtn"><span>＋</span> 新對話</button>
+
+    <div class="search-box"><input id="searchInput" type="search" placeholder="搜尋所有對話紀錄…"></div>
+
+    <div class="side-label pad">對話紀錄</div>
+    <div id="threadList" class="thread-list"></div>
+
+    <div class="side-foot">
+      <button class="ghost" id="themeBtn" title="切換深色／淺色">◐ 主題</button>
+      <span id="connDot" class="conn" title="連線狀態"></span>
+    </div>
+  </aside>
+
+  <!-- 中間：對話 -->
+  <main id="chat">
+    <header class="chat-head">
+      <button class="icon-btn mobile-only" id="sideToggle" title="產品與紀錄">☰</button>
+      <div class="title-wrap">
+        <input id="threadTitle" class="thread-title" value="" placeholder="對話標題" spellcheck="false">
+        <div id="threadSub" class="thread-sub"></div>
+      </div>
+      <div class="head-actions">
+        <button class="ghost" id="exportBtn" title="把這個對話存成 Markdown 到產品資料夾的 _records">⇩ 存成紀錄</button>
+        <button class="ghost local-only" id="openFolderBtn" title="在檔案總管打開產品資料夾">📂 資料夾</button>
+        <button class="ghost mobile-only" id="panelToggle" title="額度、檔案、設定">📊</button>
+        <button class="ghost" id="moreBtn" title="更多">⋯</button>
+        <div id="moreMenu" class="menu hidden">
+          <button data-act="reset">重新開始兩邊的記憶（保留紀錄）</button>
+          <button data-act="delete" class="danger">刪除這個對話</button>
+        </div>
+      </div>
+    </header>
+
+    <div id="messages" class="messages">
+      <div id="empty" class="empty">
+        <img src="icon.png" alt="">
+        <h2>今天要開發什麼？</h2>
+        <p>選好產品，直接打字。可以只問 Claude、只問 Codex（GPT），或讓兩邊交叉驗證。</p>
+        <div class="tips">
+          <button class="tip" data-tip="幫我看一下這個產品目前的進度，列出待解決的事">📋 看目前進度</button>
+          <button class="tip" data-tip="請檢查最新版 STEP 能不能免支撐列印，並列出風險" data-mode="cross">🔍 交叉驗證列印性</button>
+          <button class="tip" data-tip="幫我想 3 個這個產品的外觀改良方向，附示意圖" data-mode="both">💡 兩邊各給點子</button>
+        </div>
+      </div>
+    </div>
+
+    <footer class="composer-wrap">
+      <div class="mode-bar">
+        <div class="seg" id="modeSeg">
+          <button data-mode="claude" title="只問 Claude"><i class="dot claude"></i>Claude</button>
+          <button data-mode="codex" title="只問 Codex（GPT）"><i class="dot codex"></i>Codex</button>
+          <button data-mode="cross" title="Claude 先做 → Codex 審查 → Claude 驗證修正並下結論"><i class="dot claude"></i><i class="dot codex"></i>交叉驗證</button>
+          <button data-mode="both" title="同一個問題兩邊同時回答，方便比較"><i class="dot claude"></i><i class="dot codex"></i>同時問</button>
+        </div>
+        <div class="pickers">
+          <label class="picker" id="claudePickerWrap"><i class="dot claude"></i><select id="claudeModel"></select></label>
+          <label class="picker" id="codexPickerWrap"><i class="dot codex"></i><select id="codexModel"></select><select id="codexEffort" title="思考強度"></select></label>
+          <label class="picker" id="roundsWrap" title="Codex 審查幾輪">輪數<select id="rounds"><option>1</option><option>2</option><option>3</option></select></label>
+        </div>
+      </div>
+      <div id="attachRow" class="attach-row"></div>
+      <div class="composer" id="composer">
+        <button class="icon-btn" id="attachBtn" title="附加檔案（也可以直接拖曳或貼上圖片）">📎</button>
+        <input type="file" id="fileInput" multiple hidden>
+        <textarea id="input" rows="1" placeholder="輸入訊息…（Enter 送出，Shift+Enter 換行）"></textarea>
+        <button class="send" id="sendBtn" title="送出">➤</button>
+        <button class="stop hidden" id="stopBtn" title="停止">■</button>
+      </div>
+      <div class="composer-hint" id="hint"></div>
+    </footer>
+  </main>
+
+  <!-- 右側：額度、檔案、狀態、設定 -->
+  <aside id="panel">
+    <nav class="tabs" id="tabs">
+      <button data-tab="usage" class="on">額度</button>
+      <button data-tab="files">檔案</button>
+      <button data-tab="status">環境</button>
+      <button data-tab="accounts">帳號</button>
+      <button data-tab="remote" class="local-tab">遠端</button>
+      <button data-tab="settings">設定</button>
+    </nav>
+
+    <section class="tab-body" data-body="usage">
+      <div class="usage-card" id="usageClaude"></div>
+      <div class="usage-card" id="usageCodex"></div>
+      <div class="usage-foot"><span id="usageTime"></span><button class="ghost small" id="usageRefresh">↻ 更新</button></div>
+      <p class="muted small">額度是讀取你本機兩個帳號的使用狀況，只顯示百分比，不會花任何費用。</p>
+    </section>
+
+    <section class="tab-body hidden" data-body="files">
+      <div class="files-head">
+        <span id="filesProject" class="muted"></span>
+        <div><button class="ghost small" id="filesRefresh">↻</button><button class="ghost small local-only" id="filesOpen">📂</button></div>
+      </div>
+      <div class="row2" style="margin-bottom:8px"><button class="ghost small" id="exportProjectBtn" title="把整個產品資料夾打包成 zip 下載">⇩ 下載整個產品</button></div>
+      <input id="fileFilter" type="search" placeholder="篩選檔名…">
+      <div id="fileTree" class="file-tree"></div>
+    </section>
+
+    <section class="tab-body hidden" data-body="status">
+      <div id="doctor"></div>
+      <button class="ghost small" id="doctorRefresh">↻ 重新檢查</button>
+    </section>
+
+    <section class="tab-body hidden" data-body="accounts">
+      <div id="accountsBox"></div>
+    </section>
+
+    <section class="tab-body hidden" data-body="remote">
+      <div id="remoteBox"></div>
+    </section>
+
+    <section class="tab-body hidden" data-body="settings">
+      <div class="field">
+        <label>產品總資料夾</label>
+        <input id="setRoot" spellcheck="false">
+        <small>每個子資料夾＝一個產品（以 _ 開頭的會略過，例如 _template）。</small>
+      </div>
+      <div class="field">
+        <label>Claude 的權限</label>
+        <select id="setPerm">
+          <option value="bypassPermissions">全自動（可執行指令、建模、切片）</option>
+          <option value="acceptEdits">只能讀寫檔案（不執行指令）</option>
+        </select>
+        <small>Codex 固定為「全自動（只能動產品資料夾）」。</small>
+      </div>
+      <div class="field">
+        <label>Claude 模型清單 <small>（一行一個：代號|顯示名稱）</small></label>
+        <textarea id="setClaudeModels" rows="5" spellcheck="false"></textarea>
+      </div>
+      <div class="field">
+        <label>Codex 模型清單 <small>（一行一個：代號|顯示名稱；代號照 Codex 的寫法，例如 gpt-5.5）</small></label>
+        <textarea id="setCodexModels" rows="5" spellcheck="false"></textarea>
+      </div>
+      <div class="field cloud-only pw-only" style="border-top:1px solid var(--line);padding-top:14px">
+        <label>更換登入密碼</label>
+        <input id="pwCur" type="password" placeholder="目前的密碼">
+        <input id="pwNew1" type="password" placeholder="新密碼（至少 8 個字）" autocomplete="new-password">
+        <input id="pwNew2" type="password" placeholder="再輸入一次" autocomplete="new-password">
+        <div><button class="ghost" id="pwChange">更換密碼</button></div>
+        <small>換密碼後，其他已登入的裝置要重新登入。</small>
+      </div>
+      <div class="field cloud-only" style="border-top:1px solid var(--line);padding-top:14px">
+        <label>更新工作台</label>
+        <small>拿到新版的 MAKERSENSE_Workbench.zip 時，在這裡上傳，主機會自動更新並重新啟動（對話紀錄和產品都會保留）。</small>
+        <div><button class="ghost" id="updateBtn">⇪ 上傳新版工作台</button><input type="file" id="updateInput" accept=".zip" hidden></div>
+      </div>
+      <button class="primary" id="saveSettings">儲存設定</button>
+      <button class="ghost remote-only" id="logoutBtn" style="margin-left:6px">登出這台裝置</button>
+      <p class="muted small" id="dataDir"></p>
+    </section>
+  </aside>
+</div>
+
+<!-- 對話框 -->
+<div id="modal" class="modal hidden">
+  <div class="modal-card">
+    <h3 id="modalTitle"></h3>
+    <div id="modalBody"></div>
+    <div class="modal-actions"><button class="ghost" id="modalCancel">取消</button><button class="primary" id="modalOk">確定</button></div>
+  </div>
+</div>
+<div id="scrim" class="scrim hidden"></div>
+<div id="viewer" class="viewer hidden"><img id="viewerImg" alt=""><div id="viewerCap"></div></div>
+<div id="toast" class="toast hidden"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
